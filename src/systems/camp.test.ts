@@ -124,4 +124,54 @@ describe('camp building & survival shelter system', () => {
 
     camp.dispose();
   });
+
+  it('serializes and hydrates campfires & shelters with full warmth, shelter, respawn, and obstacle restoration', () => {
+    const baseRock: Obstacle = { kind: 'circle', x: 25, z: 25, radius: 1.0 };
+    const obstacles: Obstacle[] = [baseRock];
+    const camp = createCampSystem({
+      obstacles,
+      isInsidePuddle: () => false,
+    });
+
+    const fire = camp.tryBuildCampfire(-10, -8, 0, -1);
+    const shelter = camp.tryBuildShelter(-16, -8, 1, 0);
+    expect(fire.ok).toBe(true);
+    expect(shelter.ok).toBe(true);
+    const expectedObstacleCount = obstacles.length;
+    expect(expectedObstacleCount).toBe(5); // 1 base + 1 fire + 3 shelter rear posts
+
+    const saved = camp.serialize();
+    expect(saved.campfires.length).toBe(1);
+    expect(saved.shelters.length).toBe(1);
+
+    camp.reset();
+    expect(obstacles).toEqual([baseRock]);
+    expect(camp.getCounts()).toEqual({ campfires: 0, shelters: 0 });
+
+    camp.hydrate(saved);
+    expect(camp.getCounts()).toEqual({ campfires: 1, shelters: 1 });
+    expect(obstacles.length).toBe(expectedObstacleCount);
+
+    const prox: CampProximityInfo = {
+      nearFire: false,
+      inCampShelter: false,
+      fireProximity: 0,
+      fireX: 0,
+      fireZ: 0,
+      canCookAtFire: false,
+    };
+    camp.sampleProximity(fire.x, fire.z, prox);
+    expect(prox.nearFire).toBe(true);
+    expect(prox.canCookAtFire).toBe(true);
+
+    camp.sampleProximity(shelter.x, shelter.z, prox);
+    expect(prox.inCampShelter).toBe(true);
+
+    const respawn: Vec2Like = { x: 0, z: 0 };
+    expect(camp.getCampRespawnPoint(respawn)).toBe(true);
+    expect(Math.hypot(respawn.x - shelter.x, respawn.z - shelter.z)).toBeGreaterThan(1.2);
+
+    camp.dispose();
+    expect(obstacles).toEqual([baseRock]);
+  });
 });

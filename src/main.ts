@@ -4,23 +4,42 @@ import { createPlayerController, type PlayerStance } from './player/controller';
 import { createAtmosphereSystem, createRainField } from './systems/atmosphere';
 import { createFrontierAudio } from './systems/audio';
 import {
+  BUILD_PIECE_ORDER,
+  BUILD_RECIPES,
+  createBuildingSystem,
+  type BuildPieceKind,
+} from './systems/building';
+import {
   CAMPFIRE_SCRAP_COST,
   createCampSystem,
   SHELTER_SCRAP_COST,
   type CampProximityInfo,
 } from './systems/camp';
 import { createFlashlightSystem } from './systems/flashlight';
+import { createHarvestSystem, type EquippedTool } from './systems/harvest';
+import {
+  clearWorldSave,
+  loadWorldFromStorage,
+  saveWorldToStorage,
+  type WorldSaveData,
+} from './systems/persistence';
 import { createScavengeSystem } from './systems/scavenge';
 import {
   computeStealthFactor,
   isInsideShelter,
   type StealthResult,
 } from './systems/stealth';
-import { createSurvivalState, type LootBundle } from './systems/survival';
+import {
+  createSurvivalState,
+  WORKBENCH_RECIPES,
+  type CraftItemKind,
+  type LootBundle,
+  type ResourceCost,
+} from './systems/survival';
 import { createThreatSystem } from './systems/threats';
 import { createWildlifeSystem } from './systems/wildlife';
 import { createFrontierEnvironment } from './world/environment';
-import { getRoadFactor, type Obstacle, type Vec2Like } from './world/terrain';
+import { getRoadFactor, getTerrainHeight, type Obstacle, type Vec2Like } from './world/terrain';
 
 function requireElement<T extends HTMLElement>(id: string): T {
   const el = document.getElementById(id);
@@ -57,8 +76,53 @@ function formatLootSummary(loot: LootBundle): string {
   if (loot.medkits) parts.push(`+${loot.medkits} Medkit${loot.medkits > 1 ? 's' : ''}`);
   if (loot.warmers) parts.push(`+${loot.warmers} Warmer${loot.warmers > 1 ? 's' : ''}`);
   if (loot.bottles) parts.push(`+${loot.bottles} Bottle${loot.bottles > 1 ? 's' : ''}`);
+  if (loot.wood) parts.push(`+${loot.wood} Wood`);
+  if (loot.stone) parts.push(`+${loot.stone} Stone`);
   if (loot.scrap) parts.push(`+${loot.scrap} Scrap`);
   return parts.join(' · ');
+}
+
+function formatResourceCost(cost: ResourceCost): string {
+  const parts: string[] = [];
+  if (cost.wood) parts.push(`${cost.wood}W`);
+  if (cost.stone) parts.push(`${cost.stone}St`);
+  if (cost.scrap) parts.push(`${cost.scrap}Sc`);
+  return parts.join(' ');
+}
+
+function formatBuildPieceError(
+  kind: BuildPieceKind,
+  reason?: 'limit' | 'puddle' | 'blocked' | 'overlap' | 'resources' | 'inactive',
+): string {
+  if (reason === 'resources') {
+    const recipe = BUILD_RECIPES[kind];
+    return `Need ${formatResourceCost(recipe.cost)} for ${recipe.shortLabel}`;
+  }
+  if (reason === 'limit') {
+    return 'Max 64 Base Pieces Reached';
+  }
+  if (reason === 'puddle') {
+    return 'Cannot Build in Standing Water';
+  }
+  if (reason === 'overlap') {
+    return 'Position Already Occupied';
+  }
+  return 'Clear Ground Needed to Place';
+}
+
+const WORKBENCH_ORDER: readonly CraftItemKind[] = ['ration', 'medkit', 'warmer', 'bottle'];
+
+function formatWorkbenchLabel(kind: CraftItemKind): string {
+  const recipe = WORKBENCH_RECIPES[kind];
+  const name =
+    kind === 'ration'
+      ? 'Field Ration'
+      : kind === 'medkit'
+        ? 'Medkit'
+        : kind === 'warmer'
+          ? 'Hand Warmer'
+          : 'Glass Bottle';
+  return `${name} (${formatResourceCost(recipe)})`;
 }
 
 function formatCampBuildError(
@@ -87,6 +151,7 @@ function startOvergrownFrontier(): void {
   const btnExplore = requireElement<HTMLButtonElement>('btn-explore');
   const btnQuality = requireElement<HTMLButtonElement>('btn-quality');
   const btnAudio = requireElement<HTMLButtonElement>('btn-audio');
+  const btnResetWorld = requireElement<HTMLButtonElement>('btn-reset-world');
   const hudQuality = requireElement<HTMLButtonElement>('hud-quality');
   const hudAudio = requireElement<HTMLButtonElement>('hud-audio');
   const hudStance = requireElement<HTMLDivElement>('hud-stance');
@@ -105,18 +170,38 @@ function startOvergrownFrontier(): void {
 
   const scavengePrompt = requireElement<HTMLDivElement>('scavenge-prompt');
   const scavengePromptLabel = requireElement<HTMLSpanElement>('scavenge-prompt-label');
+  const workbenchBar = requireElement<HTMLDivElement>('workbench-bar');
+  const workbenchRecipeLabel = requireElement<HTMLSpanElement>('workbench-recipe-label');
+  const buildBar = requireElement<HTMLDivElement>('build-bar');
+  const buildSlots: readonly HTMLDivElement[] = [
+    requireElement<HTMLDivElement>('build-slot-0'),
+    requireElement<HTMLDivElement>('build-slot-1'),
+    requireElement<HTMLDivElement>('build-slot-2'),
+    requireElement<HTMLDivElement>('build-slot-3'),
+    requireElement<HTMLDivElement>('build-slot-4'),
+    requireElement<HTMLDivElement>('build-slot-5'),
+    requireElement<HTMLDivElement>('build-slot-6'),
+  ];
   const lootToast = requireElement<HTMLDivElement>('loot-toast');
 
   const slotRations = requireElement<HTMLDivElement>('slot-rations');
   const slotMedkits = requireElement<HTMLDivElement>('slot-medkits');
   const slotWarmers = requireElement<HTMLDivElement>('slot-warmers');
   const slotBottles = requireElement<HTMLDivElement>('slot-bottles');
+  const slotWood = requireElement<HTMLDivElement>('slot-wood');
+  const slotStone = requireElement<HTMLDivElement>('slot-stone');
   const slotScrap = requireElement<HTMLDivElement>('slot-scrap');
   const invRations = requireElement<HTMLSpanElement>('inv-rations');
   const invMedkits = requireElement<HTMLSpanElement>('inv-medkits');
   const invWarmers = requireElement<HTMLSpanElement>('inv-warmers');
   const invBottles = requireElement<HTMLSpanElement>('inv-bottles');
+  const invWood = requireElement<HTMLSpanElement>('inv-wood');
+  const invStone = requireElement<HTMLSpanElement>('inv-stone');
   const invScrap = requireElement<HTMLSpanElement>('inv-scrap');
+
+  const toolAxeEl = requireElement<HTMLDivElement>('tool-axe');
+  const toolPickaxeEl = requireElement<HTMLDivElement>('tool-pickaxe');
+  const toolFistsEl = requireElement<HTMLDivElement>('tool-fists');
 
   const gameoverOverlay = requireElement<HTMLDivElement>('gameover-overlay');
   const gameoverReason = requireElement<HTMLParagraphElement>('gameover-reason');
@@ -125,10 +210,14 @@ function startOvergrownFrontier(): void {
   let quality: GraphicsQuality = 'high';
   let exploring = false;
   let hasEnteredOnce = false;
+  let hasSavedState = false;
   let gameOverShown = false;
   let lastDamageCause: 'raider' | 'exposure' = 'exposure';
   let damageFlashAlpha = 0;
   let toastTimer = 0;
+  let autoSaveTimer = 0;
+  let equippedTool: EquippedTool = 'axe';
+  let workbenchRecipeIdx = 0;
 
   let engine: EngineContext;
   try {
@@ -145,7 +234,7 @@ function startOvergrownFrontier(): void {
   const environment = createFrontierEnvironment(quality, engine.sunDirection);
   engine.scene.add(environment.root);
 
-  // Shared live obstacle list so placed campfires & shelters immediately block movement/AI
+  // Shared live obstacle list so harvested nodes, camp structures & modular bases stay in lockstep
   const worldObstacles: Obstacle[] = environment.obstacles.slice();
 
   const audio = createFrontierAudio();
@@ -153,11 +242,26 @@ function startOvergrownFrontier(): void {
   const scavenge = createScavengeSystem();
   engine.scene.add(scavenge.root);
 
+  const harvest = createHarvestSystem({ obstacles: worldObstacles });
+  engine.scene.add(harvest.root);
+
   const camp = createCampSystem({
     obstacles: worldObstacles,
     isInsidePuddle: environment.isInsidePuddle,
   });
   engine.scene.add(camp.root);
+
+  const building = createBuildingSystem({
+    obstacles: worldObstacles,
+    isInsidePuddle: environment.isInsidePuddle,
+  });
+  engine.scene.add(building.root);
+
+  const getSupportHeight = (x: number, z: number): number => {
+    const terrainY = getTerrainHeight(x, z);
+    const floorY = building.getFloorHeightAt(x, z);
+    return floorY !== null && floorY > terrainY ? floorY : terrainY;
+  };
 
   const wildlife = createWildlifeSystem(worldObstacles);
   engine.scene.add(wildlife.root);
@@ -184,6 +288,7 @@ function startOvergrownFrontier(): void {
 
   const threats = createThreatSystem({
     obstacles: worldObstacles,
+    getSupportHeight,
     onPlayerHit(damage): void {
       if (!exploring || survival.vitals.isDead) {
         return;
@@ -208,8 +313,81 @@ function startOvergrownFrontier(): void {
         audio.playStalkerSound(kind);
       }
     },
+    onSpikeHit(_x, _z, downed, isMonster, loot): void {
+      if (!exploring || survival.vitals.isDead) {
+        return;
+      }
+      audio.playSpikeHit();
+      if (downed && loot) {
+        survival.addLoot(loot);
+        const targetName = isMonster ? 'Hollow Stalker' : 'Raider';
+        showToast(`Spikes Downed ${targetName} · ${formatLootSummary(loot)}`);
+        persistWorld();
+      }
+    },
   });
   engine.scene.add(threats.root);
+
+  function persistWorld(showFeedback = false): void {
+    const built = building.serialize();
+    const saveData: WorldSaveData = {
+      version: 1,
+      savedAt: Date.now(),
+      player: {
+        x: player.position.x,
+        z: player.position.z,
+        yaw: player.getCameraYaw(),
+      },
+      timeHours: atmosphere.snapshot.timeHours,
+      survival: survival.serialize(),
+      builtPieces: built.pieces,
+      storageStash: built.stash,
+      camp: camp.serialize(),
+      lootedCacheIds: scavenge.serializeLootedIds(),
+      depletedHarvestIds: harvest.serializeDepletedIds(),
+    };
+    if (saveWorldToStorage(saveData)) {
+      hasSavedState = true;
+      btnResetWorld.style.display = 'inline-block';
+      if (showFeedback) {
+        showToast('World Saved');
+      }
+    }
+  }
+
+  function syncBuildBarUi(): void {
+    const showBuild = building.isActive() && exploring && !survival.vitals.isDead;
+    buildBar.classList.toggle('visible', showBuild);
+    document.body.classList.toggle('build-mode-active', showBuild);
+    const selected = building.getSelectedKind();
+    for (let i = 0; i < BUILD_PIECE_ORDER.length; i += 1) {
+      const kind = BUILD_PIECE_ORDER[i];
+      const slotEl = buildSlots[i];
+      if (!kind || !slotEl) {
+        continue;
+      }
+      const affordable = survival.hasResources(BUILD_RECIPES[kind].cost);
+      slotEl.classList.toggle('selected', kind === selected);
+      slotEl.classList.toggle('unaffordable', !affordable);
+    }
+  }
+
+  function selectTool(nextTool: EquippedTool, announce = false): void {
+    equippedTool = nextTool;
+    player.setEquippedTool(nextTool);
+    toolAxeEl.classList.toggle('active', nextTool === 'axe');
+    toolPickaxeEl.classList.toggle('active', nextTool === 'pickaxe');
+    toolFistsEl.classList.toggle('active', nextTool === 'fists');
+    if (announce) {
+      const label =
+        nextTool === 'axe'
+          ? 'Felling Axe Equipped'
+          : nextTool === 'pickaxe'
+            ? 'Survival Pickaxe Equipped'
+            : 'Bare Fists Equipped';
+      showToast(label);
+    }
+  }
 
   function syncOverlayUi(): void {
     const qualityLabel = quality === 'high' ? 'High' : 'Medium';
@@ -235,6 +413,7 @@ function startOvergrownFrontier(): void {
     player.setInputEnabled(true);
     player.requestPointerLock();
     syncOverlayUi();
+    syncBuildBarUi();
   }
 
   function pauseToOverlay(): void {
@@ -242,21 +421,31 @@ function startOvergrownFrontier(): void {
       return;
     }
     exploring = false;
+    building.setActive(false);
     startOverlay.classList.remove('hidden');
     hud.classList.remove('active');
     reticle.classList.remove('visible');
+    buildBar.classList.remove('visible');
+    workbenchBar.classList.remove('visible');
+    document.body.classList.remove('build-mode-active');
     player.setInputEnabled(false);
     if (hasEnteredOnce) {
       btnExplore.textContent = 'Resume Exploring';
+    } else if (hasSavedState) {
+      btnExplore.textContent = 'Continue Saved World';
     }
   }
 
   function showGameOver(): void {
     gameOverShown = true;
     exploring = false;
+    building.setActive(false);
     player.setInputEnabled(false);
     reticle.classList.remove('visible');
     scavengePrompt.classList.remove('visible');
+    buildBar.classList.remove('visible');
+    workbenchBar.classList.remove('visible');
+    document.body.classList.remove('build-mode-active');
 
     if (document.pointerLockElement === canvas) {
       try {
@@ -305,12 +494,18 @@ function startOvergrownFrontier(): void {
         atmosphere.snapshot.fogColor,
       );
       gameoverOverlay.classList.remove('visible');
+      persistWorld();
       showToast('Woke at Camp Lean-To Shelter');
       enterExploration();
       return;
     }
 
+    clearWorldSave();
+    hasSavedState = false;
+    btnResetWorld.style.display = 'none';
+    building.reset();
     camp.reset();
+    harvest.reset();
     atmosphere.reset();
     wildlife.reset();
     survival.reset();
@@ -331,6 +526,36 @@ function startOvergrownFrontier(): void {
     enterExploration();
   }
 
+  function resetSavedWorldFromMenu(): void {
+    clearWorldSave();
+    hasSavedState = false;
+    hasEnteredOnce = false;
+    autoSaveTimer = 0;
+    workbenchRecipeIdx = 0;
+    prevWorkbenchRecipeKey = '';
+    workbenchRecipeLabel.textContent = formatWorkbenchLabel(WORKBENCH_ORDER[0] ?? 'ration');
+    btnResetWorld.style.display = 'none';
+    btnExplore.textContent = 'Click to Explore';
+    building.reset();
+    camp.reset();
+    harvest.reset();
+    scavenge.reset();
+    survival.reset();
+    threats.reset();
+    wildlife.reset();
+    atmosphere.reset();
+    flashlight.reset();
+    prevSyncedLightOn = false;
+    player.setFlashlightActive(false);
+    selectTool('axe', false);
+    player.resetToSpawn();
+    camp.sampleProximity(player.position.x, player.position.z, scratchCampProx);
+    syncSurvivalHud(FIXED_STEP);
+    syncBuildBarUi();
+    document.body.classList.remove('build-mode-active');
+    showToast('World Reset · Fresh Frontier');
+  }
+
   // Pre-allocated scratch structs (ZERO per-frame heap allocations!)
   const scratchRuinSample = { proximity: 0, sourceX: 0, sourceZ: 0 };
   const scratchSpatialAudio = {
@@ -346,6 +571,8 @@ function startOvergrownFrontier(): void {
   const scratchForward2D: Vec2Like = { x: 0, z: -1 };
   const scratchFlashOrigin = new THREE.Vector3();
   const scratchFlashDir = new THREE.Vector3(0, 0, -1);
+  const scratchAimOrigin = new THREE.Vector3();
+  const scratchAimDir = new THREE.Vector3(0, 0, -1);
   const scratchCampProx: CampProximityInfo = {
     nearFire: false,
     inCampShelter: false,
@@ -393,6 +620,7 @@ function startOvergrownFrontier(): void {
     flashlightOn: false,
     getFlashlightExposure: flashlight.getBeamExposure,
     getFireRepel: camp.getCampfireRepelPoint,
+    checkSpikeHit: building.checkSpikeHit,
   };
 
   let prevSyncedLightOn = false;
@@ -402,7 +630,11 @@ function startOvergrownFrontier(): void {
     scene: engine.scene,
     canvas,
     obstacles: worldObstacles,
-    isInsidePuddle: environment.isInsidePuddle,
+    isInsidePuddle: (x, z) => environment.isInsidePuddle(x, z) && building.getFloorHeightAt(x, z) === null,
+    getSupportHeight,
+    isBuildMode(): boolean {
+      return building.isActive();
+    },
     canSprint(): boolean {
       return survival.canSprint();
     },
@@ -437,22 +669,57 @@ function startOvergrownFrontier(): void {
       if (!hitResult.stealthTakedown) {
         threats.emitNoise(player.position.x, player.position.z, 7.5);
       }
-      if (!hitResult.hit) {
+      if (hitResult.hit) {
+        audio.playMeleeHit(hitResult.stealthTakedown || hitResult.downed);
+        player.triggerHitShake(hitResult.stealthTakedown ? 0.45 : 0.28);
+
+        if (hitResult.lootDropped) {
+          survival.addLoot(hitResult.lootDropped);
+          const prefix = hitResult.isMonster
+            ? 'Hollow Stalker Defeated'
+            : hitResult.stealthTakedown
+              ? 'Stealth Takedown'
+              : 'Raider Downed';
+          showToast(`${prefix} · ${formatLootSummary(hitResult.lootDropped)}`);
+          persistWorld();
+        } else if (hitResult.isMonster && hitResult.stealthTakedown) {
+          showToast('Ambush Strike · Hollow Stalker Wounded');
+        }
         return;
       }
-      audio.playMeleeHit(hitResult.stealthTakedown || hitResult.downed);
-      player.triggerHitShake(hitResult.stealthTakedown ? 0.45 : 0.28);
 
-      if (hitResult.lootDropped) {
-        survival.addLoot(hitResult.lootDropped);
-        const prefix = hitResult.isMonster
-          ? 'Hollow Stalker Defeated'
-          : hitResult.stealthTakedown
-            ? 'Stealth Takedown'
-            : 'Raider Downed';
-        showToast(`${prefix} · ${formatLootSummary(hitResult.lootDropped)}`);
-      } else if (hitResult.isMonster && hitResult.stealthTakedown) {
-        showToast('Ambush Strike · Hollow Stalker Wounded');
+      // If no enemy was struck, attempt physical timber/stone harvesting with equipped tool
+      const harvestHit = harvest.tryHarvestHit(x, z, fwdX, fwdZ, equippedTool);
+      if (!harvestHit.hit) {
+        return;
+      }
+      if (harvestHit.wrongTool) {
+        showToast(
+          harvestHit.neededTool === 'axe'
+            ? 'Equip Axe [4] to Chop Timber'
+            : 'Equip Pickaxe [5] to Mine Stone',
+        );
+        return;
+      }
+      if (harvestHit.kind === 'tree') {
+        audio.playWoodChop(harvestHit.depleted);
+      } else {
+        audio.playRockMine(harvestHit.depleted);
+      }
+      player.triggerHitShake(harvestHit.depleted ? 0.34 : 0.18);
+      if (harvestHit.loot) {
+        survival.addLoot(harvestHit.loot);
+        const label = harvestHit.depleted
+          ? harvestHit.kind === 'tree'
+            ? 'Timber Felled'
+            : 'Stone Shattered'
+          : harvestHit.kind === 'tree'
+            ? 'Timber Chopped'
+            : 'Stone Mined';
+        showToast(`${label} · ${formatLootSummary(harvestHit.loot)}`);
+      }
+      if (harvestHit.depleted) {
+        persistWorld();
       }
     },
     onInteract(): void {
@@ -474,6 +741,43 @@ function startOvergrownFrontier(): void {
         survival.addLoot(res.loot);
         audio.playScavenge();
         showToast(`${res.label} · ${formatLootSummary(res.loot)}`);
+        persistWorld();
+        return;
+      }
+
+      const buildTarget = building.getInteractTarget(
+        player.position.x,
+        player.position.z,
+        scratchForward2D.x,
+        scratchForward2D.z,
+      );
+      if (buildTarget) {
+        if (buildTarget.kind === 'door') {
+          const isOpen = building.toggleDoor(buildTarget.id);
+          if (isOpen !== null) {
+            audio.playDoorToggle(isOpen);
+            showToast(isOpen ? 'Door Opened' : 'Door Closed');
+            persistWorld();
+          }
+          return;
+        }
+        if (buildTarget.kind === 'workbench') {
+          const recipeKind = WORKBENCH_ORDER[workbenchRecipeIdx] ?? 'ration';
+          if (survival.craftItem(recipeKind)) {
+            audio.playItemUse();
+            showToast(`Crafted ${formatWorkbenchLabel(recipeKind)}`);
+            persistWorld();
+          } else {
+            showToast(`Need ${formatResourceCost(WORKBENCH_RECIPES[recipeKind])}`);
+          }
+          return;
+        }
+        const transfer = building.depositOrWithdrawStorage(survival);
+        if (transfer.action !== 'empty') {
+          audio.playScavenge();
+          persistWorld();
+        }
+        showToast(transfer.summary);
         return;
       }
 
@@ -484,6 +788,7 @@ function startOvergrownFrontier(): void {
       if (survival.craftFieldRation()) {
         audio.playItemUse();
         showToast('Cooked Warm Ration · +1 Ration');
+        persistWorld();
       } else {
         showToast('Need 1 Scrap to Cook Ration');
       }
@@ -577,6 +882,7 @@ function startOvergrownFrontier(): void {
       survival.spendScrap(CAMPFIRE_SCRAP_COST);
       audio.playBuildCamp('campfire');
       showToast('Campfire Built · Warmth & Stalker Repellent');
+      persistWorld();
     },
     onBuildShelter(): void {
       if (!exploring || survival.vitals.isDead) {
@@ -600,6 +906,108 @@ function startOvergrownFrontier(): void {
       survival.spendScrap(SHELTER_SCRAP_COST);
       audio.playBuildCamp('shelter');
       showToast('Lean-To Shelter Built · Camp Respawn Set');
+      persistWorld();
+    },
+    onToggleBuildMode(): void {
+      if (!exploring || survival.vitals.isDead) {
+        return;
+      }
+      const nextActive = !building.isActive();
+      building.setActive(nextActive);
+      audio.playFlashlightClick(nextActive);
+      syncBuildBarUi();
+      showToast(
+        nextActive
+          ? 'Build Mode · [Click] Place · [R] Rotate · [X] Dismantle'
+          : 'Exited Build Mode',
+      );
+    },
+    onBuildPrimary(): void {
+      if (!exploring || survival.vitals.isDead || !building.isActive()) {
+        return;
+      }
+      const res = building.tryPlaceCurrent(survival.hasResources);
+      if (!res.ok) {
+        showToast(formatBuildPieceError(res.kind, res.reason));
+        return;
+      }
+      survival.spendResources(res.cost);
+      audio.playBuildPiece();
+      syncBuildBarUi();
+      persistWorld();
+      showToast(`Built ${BUILD_RECIPES[res.kind].label}`);
+    },
+    onBuildRotate(): void {
+      if (!exploring || survival.vitals.isDead || !building.isActive()) {
+        return;
+      }
+      building.rotateGhost();
+      audio.playFlashlightClick(true);
+    },
+    onBuildDismantle(): void {
+      if (!exploring || survival.vitals.isDead || !building.isActive()) {
+        return;
+      }
+      player.getCameraRay(scratchAimOrigin, scratchAimDir);
+      const res = building.tryDismantleLookedAt(
+        scratchAimOrigin.x,
+        scratchAimOrigin.y,
+        scratchAimOrigin.z,
+        scratchAimDir.x,
+        scratchAimDir.y,
+        scratchAimDir.z,
+      );
+      if (!res.ok) {
+        showToast('Aim at a Built Piece to Dismantle');
+        return;
+      }
+      if (res.refund) {
+        survival.addLoot(res.refund);
+      }
+      audio.playDismantle();
+      syncBuildBarUi();
+      persistWorld();
+      const summary = res.refund ? ` · ${formatLootSummary(res.refund)}` : '';
+      showToast(`Dismantled ${res.label ?? 'Structure'}${summary}`);
+    },
+    onBuildSelectIndex(index): void {
+      if (!exploring || survival.vitals.isDead || !building.isActive()) {
+        return;
+      }
+      const kind = BUILD_PIECE_ORDER[index];
+      if (!kind) {
+        return;
+      }
+      building.setSelectedKind(kind);
+      syncBuildBarUi();
+    },
+    onBuildCycle(delta): void {
+      if (!exploring || survival.vitals.isDead || !building.isActive()) {
+        return;
+      }
+      building.cycleSelectedKind(delta);
+      syncBuildBarUi();
+    },
+    onSelectTool(tool): void {
+      if (!exploring || survival.vitals.isDead) {
+        return;
+      }
+      selectTool(tool, true);
+    },
+    onCycleWorkbenchRecipe(): void {
+      if (!exploring || survival.vitals.isDead) {
+        return;
+      }
+      workbenchRecipeIdx = (workbenchRecipeIdx + 1) % WORKBENCH_ORDER.length;
+      const recipeKind = WORKBENCH_ORDER[workbenchRecipeIdx] ?? 'ration';
+      workbenchRecipeLabel.textContent = formatWorkbenchLabel(recipeKind);
+      showToast(`Workbench Recipe · ${formatWorkbenchLabel(recipeKind)}`);
+    },
+    onQuickSave(): void {
+      if (!exploring || survival.vitals.isDead) {
+        return;
+      }
+      persistWorld(true);
     },
     onStanceChange(stance): void {
       hudStance.textContent = formatStanceLabel(stance);
@@ -653,6 +1061,11 @@ function startOvergrownFrontier(): void {
     toggleAudio();
   });
 
+  btnResetWorld.addEventListener('click', (event) => {
+    event.stopPropagation();
+    resetSavedWorldFromMenu();
+  });
+
   hudAudio.addEventListener('click', (event) => {
     event.stopPropagation();
     toggleAudio();
@@ -702,7 +1115,11 @@ function startOvergrownFrontier(): void {
   let prevMedkits = -1;
   let prevWarmers = -1;
   let prevBottles = -1;
+  let prevWood = -1;
+  let prevStone = -1;
   let prevScrap = -1;
+  let prevWorkbenchOpen = false;
+  let prevWorkbenchRecipeKey = '';
   let prevFlashBucket = -1;
   let prevClockMinute = -1;
   let prevClockPhase = '';
@@ -806,10 +1223,27 @@ function startOvergrownFrontier(): void {
       invBottles.textContent = String(inv.bottles);
       slotBottles.classList.toggle('empty', inv.bottles <= 0);
     }
+    let buildResourcesChanged = false;
+    if (inv.wood !== prevWood) {
+      prevWood = inv.wood;
+      invWood.textContent = String(inv.wood);
+      slotWood.classList.toggle('empty', inv.wood <= 0);
+      buildResourcesChanged = true;
+    }
+    if (inv.stone !== prevStone) {
+      prevStone = inv.stone;
+      invStone.textContent = String(inv.stone);
+      slotStone.classList.toggle('empty', inv.stone <= 0);
+      buildResourcesChanged = true;
+    }
     if (inv.scrap !== prevScrap) {
       prevScrap = inv.scrap;
       invScrap.textContent = String(inv.scrap);
       slotScrap.classList.toggle('empty', inv.scrap <= 0);
+      buildResourcesChanged = true;
+    }
+    if (buildResourcesChanged && building.isActive()) {
+      syncBuildBarUi();
     }
 
     const stats = scavenge.getStats();
@@ -848,7 +1282,7 @@ function startOvergrownFrontier(): void {
       barLight.classList.toggle('low', lightLow);
     }
 
-    // Contextual [E] scavenge / campfire cooking prompt
+    // Contextual [E] scavenge / door / workbench / storage / campfire cooking prompt
     player.getForwardXZ(scratchForward2D);
     const promptTarget =
       exploring && !v.isDead
@@ -859,9 +1293,36 @@ function startOvergrownFrontier(): void {
             scratchForward2D.z,
           )
         : null;
+    const buildInteractTarget =
+      !promptTarget && exploring && !v.isDead
+        ? building.getInteractTarget(
+            player.position.x,
+            player.position.z,
+            scratchForward2D.x,
+            scratchForward2D.z,
+          )
+        : null;
+    const showWorkbenchStrip = buildInteractTarget?.kind === 'workbench';
+    const activeWorkbenchRecipe = WORKBENCH_ORDER[workbenchRecipeIdx] ?? 'ration';
+    if (showWorkbenchStrip !== prevWorkbenchOpen) {
+      prevWorkbenchOpen = showWorkbenchStrip;
+      workbenchBar.classList.toggle('visible', showWorkbenchStrip);
+    }
+    if (showWorkbenchStrip && activeWorkbenchRecipe !== prevWorkbenchRecipeKey) {
+      prevWorkbenchRecipeKey = activeWorkbenchRecipe;
+      workbenchRecipeLabel.textContent = formatWorkbenchLabel(activeWorkbenchRecipe);
+    }
+
     let nextPromptId = '';
     if (promptTarget) {
       nextPromptId = promptTarget.id;
+    } else if (buildInteractTarget) {
+      nextPromptId =
+        buildInteractTarget.kind === 'door'
+          ? `${buildInteractTarget.id}_${buildInteractTarget.doorOpen ? 'open' : 'closed'}`
+          : buildInteractTarget.kind === 'workbench'
+            ? `wb_${activeWorkbenchRecipe}`
+            : buildInteractTarget.id;
     } else if (exploring && !v.isDead && scratchCampProx.canCookAtFire) {
       nextPromptId = inv.scrap >= 1 ? 'camp_cook_ready' : 'camp_cook_empty';
     }
@@ -869,6 +1330,12 @@ function startOvergrownFrontier(): void {
       prevPromptId = nextPromptId;
       if (promptTarget) {
         scavengePromptLabel.textContent = `Search ${promptTarget.label}`;
+        scavengePrompt.classList.add('visible');
+      } else if (buildInteractTarget) {
+        scavengePromptLabel.textContent =
+          buildInteractTarget.kind === 'workbench'
+            ? `Craft ${formatWorkbenchLabel(activeWorkbenchRecipe)}`
+            : buildInteractTarget.label;
         scavengePrompt.classList.add('visible');
       } else if (nextPromptId === 'camp_cook_ready') {
         scavengePromptLabel.textContent = 'Cook Warm Ration (1 Scrap)';
@@ -930,18 +1397,45 @@ function startOvergrownFrontier(): void {
 
       player.update(FIXED_STEP, elapsed);
       environment.update(elapsed, FIXED_STEP, atmo);
+      harvest.update(FIXED_STEP);
       camp.update(FIXED_STEP, elapsed);
+      building.update(FIXED_STEP);
 
       const px = player.position.x;
       const py = player.position.y;
       const pz = player.position.z;
       camp.sampleProximity(px, pz, scratchCampProx);
-      const inPuddle = environment.isInsidePuddle(px, pz);
-      const sheltered = isInsideShelter(px, pz) || scratchCampProx.inCampShelter;
+      const inPuddle = environment.isInsidePuddle(px, pz) && building.getFloorHeightAt(px, pz) === null;
+      const sheltered =
+        isInsideShelter(px, pz) ||
+        scratchCampProx.inCampShelter ||
+        building.isInsideBuiltShelter(px, pz);
       const roadFactor = getRoadFactor(px, pz);
       const isMoving = player.isMoving();
       const isSprinting = player.isSprinting();
       const isCrouching = player.isCrouching();
+
+      if (building.isActive() && exploring && !survival.vitals.isDead) {
+        player.getCameraAimDir(scratchAimDir);
+        const activeRecipe = BUILD_RECIPES[building.getSelectedKind()];
+        building.updateGhost(
+          px,
+          py,
+          pz,
+          scratchAimDir.x,
+          scratchAimDir.y,
+          scratchAimDir.z,
+          survival.hasResources(activeRecipe.cost),
+        );
+      }
+
+      if (exploring && !survival.vitals.isDead) {
+        autoSaveTimer += FIXED_STEP;
+        if (autoSaveTimer >= 20) {
+          autoSaveTimer = 0;
+          persistWorld();
+        }
+      }
 
       const camYaw = player.getCameraYaw();
       const rightX = Math.cos(camYaw);
@@ -1060,23 +1554,48 @@ function startOvergrownFrontier(): void {
     engine.render();
   };
 
+  // Hydrate any persisted world state from localStorage cleanly before first frame
+  const savedWorld = loadWorldFromStorage();
+  if (savedWorld) {
+    survival.hydrate(savedWorld.survival);
+    scavenge.hydrateLootedIds(savedWorld.lootedCacheIds);
+    harvest.hydrateDepletedIds(savedWorld.depletedHarvestIds);
+    camp.hydrate(savedWorld.camp);
+    building.hydrate(savedWorld.builtPieces, savedWorld.storageStash);
+    atmosphere.setTimeHours(savedWorld.timeHours);
+    player.setPositionAndYaw(savedWorld.player.x, savedWorld.player.z, savedWorld.player.yaw);
+    hasSavedState = true;
+    btnExplore.textContent = 'Continue Saved World';
+    btnResetWorld.style.display = 'inline-block';
+  }
+  selectTool('axe', false);
+
   player.update(FIXED_STEP, 0);
   environment.update(0, FIXED_STEP, atmosphere.snapshot);
+  harvest.update(0);
   camp.update(FIXED_STEP, 0);
+  building.update(0);
   camp.sampleProximity(player.position.x, player.position.z, scratchCampProx);
   scavenge.update(0, player.position.x, player.position.z);
   wildlife.update(0, 0, player.position.x, player.position.z, 0, 0, 0);
   syncSurvivalHud(FIXED_STEP);
+  syncBuildBarUi();
   player.updateCamera(FIXED_STEP);
   engine.update(0, player.position.x, player.position.y, player.position.z, atmosphere.snapshot);
   engine.render();
   rafId = window.requestAnimationFrame(frame);
 
   window.addEventListener('beforeunload', () => {
+    if (hasEnteredOnce && !survival.vitals.isDead) {
+      persistWorld();
+    }
+    document.body.classList.remove('build-mode-active');
     window.cancelAnimationFrame(rafId);
     window.removeEventListener('resize', handleResize);
     window.removeEventListener('keydown', handleGlobalKeyDown);
     player.dispose();
+    building.dispose();
+    harvest.dispose();
     camp.dispose();
     scavenge.dispose();
     threats.dispose();

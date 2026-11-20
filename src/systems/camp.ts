@@ -37,6 +37,22 @@ export interface CampSystemOptions {
   readonly isInsidePuddle: (x: number, z: number) => boolean;
 }
 
+export interface SavedCampfire {
+  readonly x: number;
+  readonly z: number;
+}
+
+export interface SavedShelter {
+  readonly x: number;
+  readonly z: number;
+  readonly yaw: number;
+}
+
+export interface SavedCampState {
+  readonly campfires: SavedCampfire[];
+  readonly shelters: SavedShelter[];
+}
+
 export interface CampSystem {
   readonly root: THREE.Group;
   tryBuildCampfire(playerX: number, playerZ: number, fwdX: number, fwdZ: number): CampBuildResult;
@@ -46,6 +62,8 @@ export interface CampSystem {
   getCampfireRepelPoint(x: number, z: number, out: Vec2Like): boolean;
   getCampRespawnPoint(out: Vec2Like): boolean;
   getCounts(): { readonly campfires: number; readonly shelters: number };
+  serialize(): SavedCampState;
+  hydrate(state: SavedCampState): void;
   update(dt: number, elapsed: number): void;
   reset(): void;
   dispose(): void;
@@ -66,6 +84,7 @@ interface PlacedShelter {
   readonly group: THREE.Group;
   readonly x: number;
   readonly z: number;
+  readonly yaw: number;
   readonly respawnX: number;
   readonly respawnZ: number;
   readonly addedObstacles: readonly Obstacle[];
@@ -448,6 +467,11 @@ export function createCampSystem(options: CampSystemOptions): CampSystem {
       return { ok: false, reason: 'blocked', x: fx, z: fz };
     }
 
+    spawnCampfireAt(fx, fz);
+    return { ok: true, x: fx, z: fz };
+  }
+
+  function spawnCampfireAt(fx: number, fz: number): void {
     const groundY = getTerrainHeight(fx, fz);
     const group = new THREE.Group();
     group.position.set(fx, groundY, fz);
@@ -555,43 +579,10 @@ export function createCampSystem(options: CampSystemOptions): CampSystem {
       phase,
       addedObstacles: [fireCollider],
     });
-
-    return { ok: true, x: fx, z: fz };
   }
 
-  function tryBuildShelter(
-    playerX: number,
-    playerZ: number,
-    fwdX: number,
-    fwdZ: number,
-  ): CampBuildResult {
-    const len = Math.hypot(fwdX, fwdZ) || 1;
-    const dirX = fwdX / len;
-    const dirZ = fwdZ / len;
-    const sx = playerX + dirX * 2.55;
-    const sz = playerZ + dirZ * 2.55;
-
-    if (shelters.length >= MAX_SHELTERS) {
-      return { ok: false, reason: 'limit', x: sx, z: sz };
-    }
-    if (isInsidePuddle(sx, sz)) {
-      return { ok: false, reason: 'puddle', x: sx, z: sz };
-    }
-    if (hasCampOverlap(sx, sz, 3.2)) {
-      return { ok: false, reason: 'overlap', x: sx, z: sz };
-    }
-
-    scratchProbe.x = sx;
-    scratchProbe.z = sz;
-    resolveHorizontalCollision(scratchProbe, 1.4, obstacles);
-    const pushedDist = Math.hypot(scratchProbe.x - sx, scratchProbe.z - sz);
-    if (pushedDist > 0.3) {
-      return { ok: false, reason: 'blocked', x: sx, z: sz };
-    }
-
+  function spawnShelterAt(sx: number, sz: number, shelterYaw: number): void {
     const groundY = getTerrainHeight(sx, sz);
-    // Open front (-Z in shelter local space) faces back toward the survivor who built it
-    const shelterYaw = Math.atan2(dirX, dirZ);
 
     const group = new THREE.Group();
     group.position.set(sx, groundY - 0.08, sz);
@@ -704,8 +695,8 @@ export function createCampSystem(options: CampSystemOptions): CampSystem {
     }
 
     // Compute clean respawn point 1.65 m in front of the open shelter entrance
-    const rawRespawnX = sx - dirX * 1.65;
-    const rawRespawnZ = sz - dirZ * 1.65;
+    const rawRespawnX = sx - sinY * 1.65;
+    const rawRespawnZ = sz - cosY * 1.65;
     scratchProbe.x = rawRespawnX;
     scratchProbe.z = rawRespawnZ;
     resolveHorizontalCollision(scratchProbe, 0.5, obstacles);
@@ -714,11 +705,46 @@ export function createCampSystem(options: CampSystemOptions): CampSystem {
       group,
       x: sx,
       z: sz,
+      yaw: shelterYaw,
       respawnX: scratchProbe.x,
       respawnZ: scratchProbe.z,
       addedObstacles,
     });
+  }
 
+  function tryBuildShelter(
+    playerX: number,
+    playerZ: number,
+    fwdX: number,
+    fwdZ: number,
+  ): CampBuildResult {
+    const len = Math.hypot(fwdX, fwdZ) || 1;
+    const dirX = fwdX / len;
+    const dirZ = fwdZ / len;
+    const sx = playerX + dirX * 2.55;
+    const sz = playerZ + dirZ * 2.55;
+
+    if (shelters.length >= MAX_SHELTERS) {
+      return { ok: false, reason: 'limit', x: sx, z: sz };
+    }
+    if (isInsidePuddle(sx, sz)) {
+      return { ok: false, reason: 'puddle', x: sx, z: sz };
+    }
+    if (hasCampOverlap(sx, sz, 3.2)) {
+      return { ok: false, reason: 'overlap', x: sx, z: sz };
+    }
+
+    scratchProbe.x = sx;
+    scratchProbe.z = sz;
+    resolveHorizontalCollision(scratchProbe, 1.4, obstacles);
+    const pushedDist = Math.hypot(scratchProbe.x - sx, scratchProbe.z - sz);
+    if (pushedDist > 0.3) {
+      return { ok: false, reason: 'blocked', x: sx, z: sz };
+    }
+
+    // Open front (-Z in shelter local space) faces back toward the survivor who built it
+    const shelterYaw = Math.atan2(dirX, dirZ);
+    spawnShelterAt(sx, sz, shelterYaw);
     return { ok: true, x: sx, z: sz };
   }
 
@@ -824,6 +850,29 @@ export function createCampSystem(options: CampSystemOptions): CampSystem {
     },
     getCounts(): { readonly campfires: number; readonly shelters: number } {
       return { campfires: campfires.length, shelters: shelters.length };
+    },
+    serialize(): SavedCampState {
+      return {
+        campfires: campfires.map((f) => ({ x: f.x, z: f.z })),
+        shelters: shelters.map((s) => ({ x: s.x, z: s.z, yaw: s.yaw })),
+      };
+    },
+    hydrate(state: SavedCampState): void {
+      clearAllStructures();
+      const maxFires = Math.min(state.campfires.length, MAX_CAMPFIRES);
+      for (let i = 0; i < maxFires; i += 1) {
+        const fire = state.campfires[i];
+        if (fire && Number.isFinite(fire.x) && Number.isFinite(fire.z)) {
+          spawnCampfireAt(fire.x, fire.z);
+        }
+      }
+      const maxShelters = Math.min(state.shelters.length, MAX_SHELTERS);
+      for (let i = 0; i < maxShelters; i += 1) {
+        const sh = state.shelters[i];
+        if (sh && Number.isFinite(sh.x) && Number.isFinite(sh.z) && Number.isFinite(sh.yaw)) {
+          spawnShelterAt(sh.x, sh.z, sh.yaw);
+        }
+      }
     },
     update(_dt: number, elapsed: number): void {
       lastElapsed = elapsed;

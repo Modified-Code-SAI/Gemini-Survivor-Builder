@@ -4,7 +4,24 @@ export interface LootBundle {
   readonly warmers?: number;
   readonly bottles?: number;
   readonly scrap?: number;
+  readonly wood?: number;
+  readonly stone?: number;
 }
+
+export interface ResourceCost {
+  readonly wood?: number;
+  readonly stone?: number;
+  readonly scrap?: number;
+}
+
+export type CraftItemKind = 'ration' | 'medkit' | 'warmer' | 'bottle';
+
+export const WORKBENCH_RECIPES: Readonly<Record<CraftItemKind, ResourceCost>> = {
+  ration: { wood: 1, scrap: 1 },
+  medkit: { wood: 1, scrap: 2 },
+  warmer: { stone: 1, scrap: 1 },
+  bottle: { stone: 1 },
+};
 
 export interface SurvivalVitals {
   health: number;
@@ -22,6 +39,18 @@ export interface SurvivalInventory {
   warmers: number;
   bottles: number;
   scrap: number;
+  wood: number;
+  stone: number;
+}
+
+export interface SurvivalSnapshot {
+  readonly vitals: {
+    readonly health: number;
+    readonly stamina: number;
+    readonly hunger: number;
+    readonly warmth: number;
+  };
+  readonly inventory: Readonly<SurvivalInventory>;
 }
 
 export interface SurvivalUpdateInput {
@@ -45,13 +74,19 @@ export interface SurvivalState {
   consumeAttackStamina(): boolean;
   applyDamage(amount: number): number;
   addLoot(bundle: LootBundle): void;
+  takeInventory(bundle: LootBundle): boolean;
+  hasResources(cost: ResourceCost): boolean;
+  spendResources(cost: ResourceCost): boolean;
   spendScrap(amount: number): boolean;
   craftFieldRation(): boolean;
+  craftItem(kind: CraftItemKind): boolean;
   useRation(): boolean;
   useMedkit(): boolean;
   useWarmer(): boolean;
   consumeBottle(): boolean;
   reviveAtCamp(): void;
+  serialize(): SurvivalSnapshot;
+  hydrate(snapshot: SurvivalSnapshot): void;
   reset(): void;
 }
 
@@ -111,6 +146,8 @@ export function createSurvivalState(): SurvivalState {
     warmers: 0,
     bottles: 0,
     scrap: 0,
+    wood: 0,
+    stone: 0,
   };
 
   function syncExhaustionState(): void {
@@ -215,6 +252,77 @@ export function createSurvivalState(): SurvivalState {
     inventory.warmers += sanitizeCount(bundle.warmers);
     inventory.bottles += sanitizeCount(bundle.bottles);
     inventory.scrap += sanitizeCount(bundle.scrap);
+    inventory.wood += sanitizeCount(bundle.wood);
+    inventory.stone += sanitizeCount(bundle.stone);
+  }
+
+  function takeInventory(bundle: LootBundle): boolean {
+    if (vitals.isDead) {
+      return false;
+    }
+    const r = sanitizeCount(bundle.rations);
+    const m = sanitizeCount(bundle.medkits);
+    const wrm = sanitizeCount(bundle.warmers);
+    const b = sanitizeCount(bundle.bottles);
+    const sc = sanitizeCount(bundle.scrap);
+    const wd = sanitizeCount(bundle.wood);
+    const st = sanitizeCount(bundle.stone);
+    if (r + m + wrm + b + sc + wd + st === 0) {
+      return false;
+    }
+    if (
+      inventory.rations < r ||
+      inventory.medkits < m ||
+      inventory.warmers < wrm ||
+      inventory.bottles < b ||
+      inventory.scrap < sc ||
+      inventory.wood < wd ||
+      inventory.stone < st
+    ) {
+      return false;
+    }
+    inventory.rations -= r;
+    inventory.medkits -= m;
+    inventory.warmers -= wrm;
+    inventory.bottles -= b;
+    inventory.scrap -= sc;
+    inventory.wood -= wd;
+    inventory.stone -= st;
+    return true;
+  }
+
+  function hasResources(cost: ResourceCost): boolean {
+    const needWood = sanitizeCount(cost.wood);
+    const needStone = sanitizeCount(cost.stone);
+    const needScrap = sanitizeCount(cost.scrap);
+    return (
+      inventory.wood >= needWood &&
+      inventory.stone >= needStone &&
+      inventory.scrap >= needScrap
+    );
+  }
+
+  function spendResources(cost: ResourceCost): boolean {
+    if (vitals.isDead) {
+      return false;
+    }
+    const needWood = sanitizeCount(cost.wood);
+    const needStone = sanitizeCount(cost.stone);
+    const needScrap = sanitizeCount(cost.scrap);
+    if (needWood === 0 && needStone === 0 && needScrap === 0) {
+      return false;
+    }
+    if (
+      inventory.wood < needWood ||
+      inventory.stone < needStone ||
+      inventory.scrap < needScrap
+    ) {
+      return false;
+    }
+    inventory.wood -= needWood;
+    inventory.stone -= needStone;
+    inventory.scrap -= needScrap;
+    return true;
   }
 
   function useRation(): boolean {
@@ -264,6 +372,32 @@ export function createSurvivalState(): SurvivalState {
     return true;
   }
 
+  function craftItem(kind: CraftItemKind): boolean {
+    const recipe = WORKBENCH_RECIPES[kind];
+    if (!spendResources(recipe)) {
+      return false;
+    }
+    switch (kind) {
+      case 'ration':
+        inventory.rations += 1;
+        break;
+      case 'medkit':
+        inventory.medkits += 1;
+        break;
+      case 'warmer':
+        inventory.warmers += 1;
+        break;
+      case 'bottle':
+        inventory.bottles += 1;
+        break;
+      default: {
+        const exhaustiveCheck: never = kind;
+        return exhaustiveCheck;
+      }
+    }
+    return true;
+  }
+
   function consumeBottle(): boolean {
     if (vitals.isDead || inventory.bottles <= 0) {
       return false;
@@ -282,6 +416,51 @@ export function createSurvivalState(): SurvivalState {
     vitals.sheltered = true;
   }
 
+  function sanitizeVital(value: number | undefined, fallback: number): number {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      return fallback;
+    }
+    return clampVital(value);
+  }
+
+  function serialize(): SurvivalSnapshot {
+    return {
+      vitals: {
+        health: vitals.health,
+        stamina: vitals.stamina,
+        hunger: vitals.hunger,
+        warmth: vitals.warmth,
+      },
+      inventory: {
+        rations: inventory.rations,
+        medkits: inventory.medkits,
+        warmers: inventory.warmers,
+        bottles: inventory.bottles,
+        scrap: inventory.scrap,
+        wood: inventory.wood,
+        stone: inventory.stone,
+      },
+    };
+  }
+
+  function hydrate(snapshot: SurvivalSnapshot): void {
+    vitals.health = sanitizeVital(snapshot.vitals.health, MAX_VITAL);
+    vitals.stamina = sanitizeVital(snapshot.vitals.stamina, MAX_VITAL);
+    vitals.hunger = sanitizeVital(snapshot.vitals.hunger, MAX_VITAL);
+    vitals.warmth = sanitizeVital(snapshot.vitals.warmth, MAX_VITAL);
+    vitals.isDead = vitals.health <= 0;
+    vitals.exhausted = vitals.stamina < STAMINA_EXHAUST_THRESHOLD;
+    vitals.sheltered = false;
+
+    inventory.rations = sanitizeCount(snapshot.inventory.rations);
+    inventory.medkits = sanitizeCount(snapshot.inventory.medkits);
+    inventory.warmers = sanitizeCount(snapshot.inventory.warmers);
+    inventory.bottles = sanitizeCount(snapshot.inventory.bottles);
+    inventory.scrap = sanitizeCount(snapshot.inventory.scrap);
+    inventory.wood = sanitizeCount(snapshot.inventory.wood);
+    inventory.stone = sanitizeCount(snapshot.inventory.stone);
+  }
+
   function reset(): void {
     vitals.health = MAX_VITAL;
     vitals.stamina = MAX_VITAL;
@@ -296,6 +475,8 @@ export function createSurvivalState(): SurvivalState {
     inventory.warmers = 0;
     inventory.bottles = 0;
     inventory.scrap = 0;
+    inventory.wood = 0;
+    inventory.stone = 0;
   }
 
   return {
@@ -309,13 +490,19 @@ export function createSurvivalState(): SurvivalState {
     consumeAttackStamina,
     applyDamage,
     addLoot,
+    takeInventory,
+    hasResources,
+    spendResources,
     spendScrap,
     craftFieldRation,
+    craftItem,
     useRation,
     useMedkit,
     useWarmer,
     consumeBottle,
     reviveAtCamp,
+    serialize,
+    hydrate,
     reset,
   };
 }

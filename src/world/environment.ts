@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { Reflector } from 'three/examples/jsm/objects/Reflector.js';
 import type { GraphicsQuality } from '../engine/renderer';
 import type { AtmosphereSnapshot } from '../systems/atmosphere';
+import { HARVEST_NODE_SPECS } from '../systems/harvest';
 import { collectMaterialTextures, loadOptionalGlbSlot } from './assetLoader';
 import {
   createObbObstacle,
@@ -584,7 +585,22 @@ function createStandardMaterial(
   });
 }
 
-type TreeSpecies = 'douglas_fir' | 'spruce' | 'broad_pine' | 'alder' | 'dead_snag';
+export type TreeSpecies = 'douglas_fir' | 'spruce' | 'broad_pine' | 'alder' | 'dead_snag';
+
+// Hand-curated multi-species hero vista framing Old Route 9 from spawn down the valley
+export const HERO_TREE_COORDS: ReadonlyArray<readonly [number, number, number, TreeSpecies]> = [
+  [-12.6, 12.6, 21.5, 'douglas_fir'],
+  [-15.2, 8.8, 23.2, 'spruce'],
+  [-15.4, 1.4, 18.8, 'broad_pine'],
+  [-9.6, -4.4, 11.4, 'alder'],
+  [-11.8, -12.0, 22.4, 'douglas_fir'],
+  [-8.6, -22.5, 13.8, 'dead_snag'],
+  [13.4, 12.6, 21.8, 'spruce'],
+  [17.0, 5.4, 18.2, 'broad_pine'],
+  [18.8, -4.5, 24.6, 'douglas_fir'],
+  [15.8, -16.8, 10.8, 'alder'],
+  [10.4, -26.0, 19.8, 'spruce'],
+];
 
 interface TreeClusterAnchor {
   readonly x: number;
@@ -908,7 +924,7 @@ function createDouglasFirTrunkGeometry(): THREE.BufferGeometry {
  * Archetype 1 Canopy: Asymmetrical towering Pacific Northwest Douglas-fir crown
  * rising cleanly above the bare lower dead-branch stubs.
  */
-function createDouglasFirCanopyGeometry(): THREE.BufferGeometry {
+export function createDouglasFirCanopyGeometry(): THREE.BufferGeometry {
   const rng = createRng(74129);
   const buf: FoliageCardBuffers = { positions: [], uvs: [], colors: [], indices: [] };
 
@@ -3691,20 +3707,7 @@ export function createFrontierEnvironment(
   });
 
   // Hand-curated multi-species hero vista framing Old Route 9 from spawn down the valley
-  const heroTreeCoords: ReadonlyArray<readonly [number, number, number, TreeSpecies]> = [
-    [-12.6, 12.6, 21.5, 'douglas_fir'],
-    [-15.2, 8.8, 23.2, 'spruce'],
-    [-15.4, 1.4, 18.8, 'broad_pine'],
-    [-9.6, -4.4, 11.4, 'alder'],
-    [-11.8, -12.0, 22.4, 'douglas_fir'],
-    [-8.6, -22.5, 13.8, 'dead_snag'],
-    [13.4, 12.6, 21.8, 'spruce'],
-    [17.0, 5.4, 18.2, 'broad_pine'],
-    [18.8, -4.5, 24.6, 'douglas_fir'],
-    [15.8, -16.8, 10.8, 'alder'],
-    [10.4, -26.0, 19.8, 'spruce'],
-  ];
-  for (const [tx, tz, th, species] of heroTreeCoords) {
+  for (const [tx, tz, th, species] of HERO_TREE_COORDS) {
     const baseW =
       species === 'broad_pine'
         ? 1.02 + rng() * 0.24
@@ -3752,6 +3755,18 @@ export function createFrontierEnvironment(
       continue;
     }
     if (Math.hypot(tx - SPAWN_POINT.x, tz - SPAWN_POINT.z) < 5.6) {
+      continue;
+    }
+
+    let hitsHarvestNode = false;
+    for (let h = 0; h < HARVEST_NODE_SPECS.length; h += 1) {
+      const node = HARVEST_NODE_SPECS[h];
+      if (node && Math.hypot(tx - node.x, tz - node.z) < 2.8) {
+        hitsHarvestNode = true;
+        break;
+      }
+    }
+    if (hitsHarvestNode) {
       continue;
     }
 

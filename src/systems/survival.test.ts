@@ -17,6 +17,8 @@ describe('survival state system', () => {
     expect(survival.inventory.warmers).toBe(0);
     expect(survival.inventory.bottles).toBe(0);
     expect(survival.inventory.scrap).toBe(0);
+    expect(survival.inventory.wood).toBe(0);
+    expect(survival.inventory.stone).toBe(0);
   });
 
   it('drains stamina when sprinting and enforces exhaustion lock hysteresis', () => {
@@ -148,6 +150,8 @@ describe('survival state system', () => {
       warmers: 1,
       bottles: 2,
       scrap: 3,
+      wood: 0,
+      stone: 0,
     });
 
     // Lower vitals so item gains are directly observable
@@ -273,5 +277,67 @@ describe('survival state system', () => {
     expect(survival.inventory.scrap).toBe(2);
     expect(survival.inventory.rations).toBe(1);
     expect(survival.inventory.bottles).toBe(2);
+  });
+
+  it('tracks wood & stone, enforces atomic spendResources, crafts workbench items, and serializes/hydrates cleanly', () => {
+    const survival = createSurvivalState();
+    survival.addLoot({ wood: 5, stone: 3, scrap: 4 });
+    expect(survival.inventory.wood).toBe(5);
+    expect(survival.inventory.stone).toBe(3);
+    expect(survival.inventory.scrap).toBe(4);
+
+    // Atomic rejection: insufficient stone must NOT deduct wood or scrap
+    expect(survival.hasResources({ wood: 4, stone: 4, scrap: 1 })).toBe(false);
+    expect(survival.spendResources({ wood: 4, stone: 4, scrap: 1 })).toBe(false);
+    expect(survival.inventory.wood).toBe(5);
+    expect(survival.inventory.stone).toBe(3);
+    expect(survival.inventory.scrap).toBe(4);
+
+    // Atomic spend succeeds when all resources are available
+    expect(survival.hasResources({ wood: 2, stone: 1 })).toBe(true);
+    expect(survival.spendResources({ wood: 2, stone: 1 })).toBe(true);
+    expect(survival.inventory.wood).toBe(3);
+    expect(survival.inventory.stone).toBe(2);
+
+    // Workbench crafting recipes: ration (1W+1Sc), medkit (1W+2Sc), warmer (1St+1Sc), bottle (1St)
+    expect(survival.craftItem('ration')).toBe(true); // W:2, St:2, Sc:3
+    expect(survival.craftItem('medkit')).toBe(true); // W:1, St:2, Sc:1
+    expect(survival.craftItem('warmer')).toBe(true); // W:1, St:1, Sc:0
+    expect(survival.craftItem('bottle')).toBe(true); // W:1, St:0, Sc:0
+    expect(survival.craftItem('medkit')).toBe(false); // No scrap left
+    expect(survival.inventory.rations).toBe(1);
+    expect(survival.inventory.medkits).toBe(1);
+    expect(survival.inventory.warmers).toBe(1);
+    expect(survival.inventory.bottles).toBe(1);
+
+    // Serialize & hydrate round-trip with out-of-range sanitization
+    survival.applyDamage(28);
+    const snap = survival.serialize();
+    const restored = createSurvivalState();
+    restored.hydrate(snap);
+    expect(restored.vitals.health).toBeCloseTo(72, 4);
+    expect(restored.inventory).toEqual(survival.inventory);
+
+    restored.hydrate({
+      vitals: { health: 999, stamina: 2, hunger: -50, warmth: Number.NaN },
+      inventory: {
+        rations: -4,
+        medkits: 2.9,
+        warmers: Number.NaN,
+        bottles: 1,
+        scrap: 3,
+        wood: 7,
+        stone: 5,
+      },
+    });
+    expect(restored.vitals.health).toBe(100);
+    expect(restored.vitals.exhausted).toBe(true);
+    expect(restored.vitals.hunger).toBe(0);
+    expect(restored.vitals.warmth).toBe(100);
+    expect(restored.inventory.rations).toBe(0);
+    expect(restored.inventory.medkits).toBe(2);
+    expect(restored.inventory.warmers).toBe(0);
+    expect(restored.inventory.wood).toBe(7);
+    expect(restored.inventory.stone).toBe(5);
   });
 });

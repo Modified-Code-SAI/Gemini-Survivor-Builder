@@ -34,6 +34,7 @@ export interface ThreatsUpdateInput {
   readonly flashlightOn?: boolean;
   readonly getFlashlightExposure?: (x: number, y: number, z: number) => number;
   readonly getFireRepel?: (x: number, z: number, out: Vec2Like) => boolean;
+  readonly checkSpikeHit?: (x: number, z: number, radius: number) => boolean;
 }
 
 export interface PlayerMeleeHitResult {
@@ -48,10 +49,18 @@ export interface PlayerMeleeHitResult {
 
 export interface ThreatSystemOptions {
   readonly obstacles: readonly Obstacle[];
+  readonly getSupportHeight?: (x: number, z: number) => number;
   readonly onPlayerHit?: (damage: number, sourceX: number, sourceZ: number) => void;
   readonly onBottleShatter?: (x: number, z: number) => void;
   readonly onAlertSting?: (level: 'suspicious' | 'alert') => void;
   readonly onStalkerSound?: (kind: 'prowl' | 'shriek' | 'recoil') => void;
+  readonly onSpikeHit?: (
+    x: number,
+    z: number,
+    downed: boolean,
+    isMonster: boolean,
+    loot?: LootBundle,
+  ) => void;
 }
 
 export interface ThreatSystem {
@@ -158,6 +167,7 @@ interface RaiderActor {
   fireFleeX: number;
   fireFleeZ: number;
   fireRecoilCooldown: number;
+  spikeHitCooldown: number;
   prowlSoundCooldown: number;
   shriekCooldown: number;
   downProgress: number;
@@ -600,7 +610,17 @@ function buildProceduralStalkerRig(
  * plus a zero-allocation throwable distraction bottle pool.
  */
 export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
-  const { obstacles, onPlayerHit, onBottleShatter, onAlertSting, onStalkerSound } = options;
+  const {
+    obstacles,
+    getSupportHeight,
+    onPlayerHit,
+    onBottleShatter,
+    onAlertSting,
+    onStalkerSound,
+    onSpikeHit,
+  } = options;
+  const sampleSupportHeight = (x: number, z: number): number =>
+    getSupportHeight ? getSupportHeight(x, z) : getTerrainHeight(x, z);
 
   const root = new THREE.Group();
   const atlas = getWorldTextureAtlas();
@@ -690,7 +710,7 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       continue;
     }
     const actorRoot = new THREE.Group();
-    const startY = getTerrainHeight(spec.spawnX, spec.spawnZ);
+    const startY = sampleSupportHeight(spec.spawnX, spec.spawnZ);
     actorRoot.position.set(spec.spawnX, startY, spec.spawnZ);
     actorRoot.rotation.y = spec.spawnYaw;
 
@@ -767,6 +787,7 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       fireFleeX: 0,
       fireFleeZ: 0,
       fireRecoilCooldown: 0,
+      spikeHitCooldown: 0,
       prowlSoundCooldown: 4.5,
       shriekCooldown: 0,
       downProgress: 0,
@@ -1463,6 +1484,7 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       flashlightOn = false,
       getFlashlightExposure,
       getFireRepel,
+      checkSpikeHit,
     } = input;
     const nocturnalHunt = nightFactor > 0.35 || rainIntensity > 0.4;
 
@@ -1481,7 +1503,7 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       b.mesh.rotation.x += dt * 9.5;
       b.mesh.rotation.z += dt * 6.2;
 
-      const groundY = getTerrainHeight(b.x, b.z);
+      const groundY = sampleSupportHeight(b.x, b.z);
       scratchBottlePos.x = b.x;
       scratchBottlePos.z = b.z;
       const hitObstacle = resolveHorizontalCollision(scratchBottlePos, 0.14, obstacles);
@@ -1489,7 +1511,7 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       if (b.y <= groundY + 0.06 || hitObstacle || b.age > 3.5) {
         const hitX = hitObstacle ? scratchBottlePos.x : b.x;
         const hitZ = hitObstacle ? scratchBottlePos.z : b.z;
-        const impactY = Math.max(getTerrainHeight(hitX, hitZ), b.y);
+        const impactY = Math.max(sampleSupportHeight(hitX, hitZ), b.y);
         b.active = false;
         b.mesh.visible = false;
         spawnShatterBurst(hitX, impactY, hitZ);
@@ -1563,6 +1585,9 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       if (actor.fireFleeTimer > 0) {
         actor.fireFleeTimer = Math.max(0, actor.fireFleeTimer - dt);
       }
+      if (actor.spikeHitCooldown > 0) {
+        actor.spikeHitCooldown = Math.max(0, actor.spikeHitCooldown - dt);
+      }
       if (actor.shriekCooldown > 0) {
         actor.shriekCooldown = Math.max(0, actor.shriekCooldown - dt);
       }
@@ -1577,7 +1602,7 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
         actor.z = scratchMovePos.z;
         actor.staggerVelX *= Math.max(0, 1 - dt * 6);
         actor.staggerVelZ *= Math.max(0, 1 - dt * 6);
-        actor.y = getTerrainHeight(actor.x, actor.z);
+        actor.y = sampleSupportHeight(actor.x, actor.z);
         actor.root.position.set(actor.x, actor.y, actor.z);
         actor.speed = 0;
         highestAlert = 'alert';
@@ -1893,9 +1918,65 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
         actor.speed += (0 - actor.speed) * Math.min(1, dt * 10);
       }
 
-      actor.y = getTerrainHeight(actor.x, actor.z);
+      actor.y = sampleSupportHeight(actor.x, actor.z);
       actor.root.position.set(actor.x, actor.y, actor.z);
       actor.root.rotation.y = actor.yaw;
+
+      // Defensive wooden spikes impale, damage & push back hostile raiders and Hollow Stalkers
+      if (
+        checkSpikeHit !== undefined &&
+        actor.spikeHitCooldown <= 0 &&
+        checkSpikeHit(actor.x, actor.z, RAIDER_RADIUS)
+      ) {
+        actor.spikeHitCooldown = 0.95;
+        actor.hp = Math.max(0, actor.hp - 18);
+        actor.attackSwingTimer = 0;
+        actor.attackHitDelivered = true;
+        if (actor.hp <= 0) {
+          actor.state = 'downed';
+          actor.awareness = 0;
+          actor.speed = 0;
+          actor.statusSprite.visible = false;
+          if (actor.eyeEmberGroup) {
+            actor.eyeEmberGroup.visible = false;
+          }
+          if (actor.glbRig?.deathAction) {
+            actor.glbRig.deathAction.reset();
+            actor.glbRig.deathAction.setLoop(THREE.LoopOnce, 1);
+            actor.glbRig.deathAction.clampWhenFinished = true;
+            actor.glbRig.deathAction.timeScale = 1.15;
+            actor.glbRig.deathAction.play();
+          }
+          if (onSpikeHit) {
+            onSpikeHit(actor.x, actor.z, true, actor.spec.isMonster, actor.spec.dropLoot);
+          }
+          updateRaiderAnimation(actor, dt, elapsed);
+          continue;
+        }
+
+        actor.staggerTimer = 0.38;
+        const backX = moveSpeed > 0 ? -desiredMoveX : Math.sin(actor.yaw);
+        const backZ = moveSpeed > 0 ? -desiredMoveZ : Math.cos(actor.yaw);
+        actor.staggerVelX = backX * 2.1;
+        actor.staggerVelZ = backZ * 2.1;
+        if (actor.glbRig) {
+          actor.glbRig.wAttack = 0;
+          if (actor.glbRig.attackAction) {
+            actor.glbRig.attackAction.stop();
+            actor.glbRig.attackAction.setEffectiveWeight(0);
+          }
+          if (actor.glbRig.hitAction) {
+            actor.glbRig.hitAction.reset();
+            actor.glbRig.hitAction.setLoop(THREE.LoopOnce, 1);
+            actor.glbRig.hitAction.clampWhenFinished = true;
+            actor.glbRig.hitAction.timeScale = 1.05;
+            actor.glbRig.hitAction.play();
+          }
+        }
+        if (onSpikeHit) {
+          onSpikeHit(actor.x, actor.z, false, actor.spec.isMonster);
+        }
+      }
 
       // Diegetic world-space status indicator (? amber while suspicious/investigating, ! crimson when alerted)
       if (actor.state === 'chase' || actor.state === 'attack') {
@@ -1980,7 +2061,7 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       const { spec } = actor;
       actor.x = spec.spawnX;
       actor.z = spec.spawnZ;
-      actor.y = getTerrainHeight(spec.spawnX, spec.spawnZ);
+      actor.y = sampleSupportHeight(spec.spawnX, spec.spawnZ);
       actor.yaw = spec.spawnYaw;
       actor.speed = 0;
       actor.hp = spec.maxHealth;
@@ -2003,6 +2084,7 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       actor.fireFleeX = 0;
       actor.fireFleeZ = 0;
       actor.fireRecoilCooldown = 0;
+      actor.spikeHitCooldown = 0;
       actor.prowlSoundCooldown = 4.5;
       actor.shriekCooldown = 0;
       actor.downProgress = 0;

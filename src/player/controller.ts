@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { EquippedTool } from '../systems/harvest';
 import { collectMaterialTextures, loadOptionalGlbAsset } from '../world/assetLoader';
 import {
   clamp,
@@ -26,6 +27,8 @@ export interface PlayerControllerOptions {
   readonly canvas: HTMLCanvasElement;
   readonly obstacles: readonly Obstacle[];
   readonly isInsidePuddle?: (x: number, z: number) => boolean;
+  readonly getSupportHeight?: (x: number, z: number) => number;
+  readonly isBuildMode?: () => boolean;
   readonly canSprint?: () => boolean;
   readonly canJump?: () => boolean;
   readonly canAttack?: () => boolean;
@@ -53,6 +56,15 @@ export interface PlayerControllerOptions {
   readonly onToggleStorm?: () => void;
   readonly onBuildCampfire?: () => void;
   readonly onBuildShelter?: () => void;
+  readonly onToggleBuildMode?: () => void;
+  readonly onBuildPrimary?: () => void;
+  readonly onBuildRotate?: () => void;
+  readonly onBuildDismantle?: () => void;
+  readonly onBuildSelectIndex?: (index: number) => void;
+  readonly onBuildCycle?: (delta: number) => void;
+  readonly onSelectTool?: (tool: EquippedTool) => void;
+  readonly onCycleWorkbenchRecipe?: () => void;
+  readonly onQuickSave?: () => void;
   readonly onStanceChange?: (stance: PlayerStance) => void;
   readonly onPointerLockChange?: (locked: boolean) => void;
 }
@@ -64,7 +76,9 @@ export interface PlayerController {
   requestPointerLock(): void;
   setInputEnabled(enabled: boolean): void;
   setFlashlightActive(active: boolean): void;
+  setEquippedTool(tool: EquippedTool): void;
   getFlashlightTransform(outOrigin: THREE.Vector3, outDir: THREE.Vector3): void;
+  getCameraRay(outOrigin: THREE.Vector3, outDir: THREE.Vector3): void;
   getStance(): PlayerStance;
   getCameraYaw(): number;
   getForwardXZ(out: Vec2Like): void;
@@ -73,6 +87,7 @@ export interface PlayerController {
   isCrouching(): boolean;
   isMoving(): boolean;
   triggerHitShake(intensity: number): void;
+  setPositionAndYaw(x: number, z: number, yaw: number): void;
   resetToSpawn(targetX?: number, targetZ?: number): void;
   update(dt: number, elapsed: number): void;
   updateCamera(dt: number): void;
@@ -1261,6 +1276,126 @@ function createChestFlashlightProp(): ChestFlashlightProp {
   };
 }
 
+interface HandToolsProp {
+  readonly group: THREE.Group;
+  setTool(tool: EquippedTool): void;
+  dispose(): void;
+}
+
+/**
+ * Compact PBR weathered Felling Axe & Pickaxe props mounted onto the survivor's right hand bone
+ * (hand_R on survivor.glb or axePivot on the procedural fallback) and disposed cleanly once.
+ */
+function createHandToolsProp(): HandToolsProp {
+  const group = new THREE.Group();
+  group.name = 'SurvivorHandTools';
+
+  const geometries: THREE.BufferGeometry[] = [];
+  const trackGeo = <T extends THREE.BufferGeometry>(g: T): T => {
+    geometries.push(g);
+    return g;
+  };
+
+  const handleMat = new THREE.MeshStandardMaterial({
+    color: 0x735235,
+    roughness: 0.88,
+    metalness: 0.04,
+  });
+  const wrapMat = new THREE.MeshStandardMaterial({
+    color: 0x2c2824,
+    roughness: 0.92,
+    metalness: 0.06,
+  });
+  const steelMat = new THREE.MeshStandardMaterial({
+    color: 0x62686c,
+    roughness: 0.44,
+    metalness: 0.78,
+  });
+  const edgeMat = new THREE.MeshStandardMaterial({
+    color: 0xa2abb0,
+    roughness: 0.3,
+    metalness: 0.86,
+  });
+
+  // 1. Weathered Felling Axe
+  const axeGroup = new THREE.Group();
+  const axeHaft = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.017, 0.022, 0.64, 8)), handleMat);
+  axeHaft.position.set(0, 0.22, 0);
+  axeHaft.castShadow = true;
+  axeGroup.add(axeHaft);
+
+  const axeGrip = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.021, 0.023, 0.16, 8)), wrapMat);
+  axeGrip.position.set(0, -0.02, 0);
+  axeGroup.add(axeGrip);
+
+  const axePoll = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.036, 0.065, 0.08)), steelMat);
+  axePoll.position.set(0, 0.5, 0);
+  axePoll.castShadow = true;
+  axeGroup.add(axePoll);
+
+  const axeBlade = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.018, 0.115, 0.125)), edgeMat);
+  axeBlade.position.set(0, 0.5, -0.078);
+  axeBlade.castShadow = true;
+  axeGroup.add(axeBlade);
+  group.add(axeGroup);
+
+  // 2. Heavy Survival Pickaxe
+  const pickGroup = new THREE.Group();
+  const pickHaft = new THREE.Mesh(
+    trackGeo(new THREE.CylinderGeometry(0.018, 0.022, 0.66, 8)),
+    handleMat,
+  );
+  pickHaft.position.set(0, 0.23, 0);
+  pickHaft.castShadow = true;
+  pickGroup.add(pickHaft);
+
+  const pickGrip = new THREE.Mesh(
+    trackGeo(new THREE.CylinderGeometry(0.021, 0.023, 0.16, 8)),
+    wrapMat,
+  );
+  pickGrip.position.set(0, -0.02, 0);
+  pickGroup.add(pickGrip);
+
+  const pickCollar = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.052, 0.064, 0.072)), steelMat);
+  pickCollar.position.set(0, 0.52, 0);
+  pickCollar.castShadow = true;
+  pickGroup.add(pickCollar);
+
+  const pickPointFront = new THREE.Mesh(trackGeo(new THREE.ConeGeometry(0.024, 0.22, 6)), edgeMat);
+  pickPointFront.position.set(0, 0.505, -0.13);
+  pickPointFront.rotation.x = -Math.PI * 0.55;
+  pickPointFront.castShadow = true;
+  pickGroup.add(pickPointFront);
+
+  const pickPointBack = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.036, 0.024, 0.17)), steelMat);
+  pickPointBack.position.set(0, 0.51, 0.1);
+  pickPointBack.rotation.x = 0.16;
+  pickPointBack.castShadow = true;
+  pickGroup.add(pickPointBack);
+
+  pickGroup.visible = false;
+  group.add(pickGroup);
+
+  return {
+    group,
+    setTool(tool: EquippedTool): void {
+      axeGroup.visible = tool === 'axe';
+      pickGroup.visible = tool === 'pickaxe';
+      group.visible = tool !== 'fists';
+    },
+    dispose(): void {
+      group.removeFromParent();
+      for (let i = 0; i < geometries.length; i += 1) {
+        geometries[i]?.dispose();
+      }
+      handleMat.dispose();
+      wrapMat.dispose();
+      steelMat.dispose();
+      edgeMat.dispose();
+    },
+  };
+}
+
 export function createPlayerController(options: PlayerControllerOptions): PlayerController {
   const {
     camera,
@@ -1268,6 +1403,8 @@ export function createPlayerController(options: PlayerControllerOptions): Player
     canvas,
     obstacles,
     isInsidePuddle,
+    getSupportHeight,
+    isBuildMode,
     canSprint,
     canJump,
     canAttack,
@@ -1288,14 +1425,26 @@ export function createPlayerController(options: PlayerControllerOptions): Player
     onToggleStorm,
     onBuildCampfire,
     onBuildShelter,
+    onToggleBuildMode,
+    onBuildPrimary,
+    onBuildRotate,
+    onBuildDismantle,
+    onBuildSelectIndex,
+    onBuildCycle,
+    onSelectTool,
+    onCycleWorkbenchRecipe,
+    onQuickSave,
     onStanceChange,
     onPointerLockChange,
   } = options;
 
+  const sampleSupportHeight = (x: number, z: number): number =>
+    getSupportHeight ? getSupportHeight(x, z) : getTerrainHeight(x, z);
+
   const atlas = getWorldTextureAtlas();
   const rig = buildSurvivorRig(atlas.fabricOlive);
   const root = rig.root;
-  const startY = getTerrainHeight(SPAWN_POINT.x, SPAWN_POINT.z);
+  const startY = sampleSupportHeight(SPAWN_POINT.x, SPAWN_POINT.z);
   const position = new THREE.Vector3(SPAWN_POINT.x, startY, SPAWN_POINT.z);
   root.position.copy(position);
   scene.add(root);
@@ -1303,6 +1452,18 @@ export function createPlayerController(options: PlayerControllerOptions): Player
   const chestFlashlight = createChestFlashlightProp();
   chestFlashlight.group.position.set(0.142, 0.34, -0.175);
   rig.chestUpper.add(chestFlashlight.group);
+
+  // Replace procedural axe meshes visually with unified switchable Felling Axe / Pickaxe / Fists prop
+  for (let i = 0; i < rig.axePivot.children.length; i += 1) {
+    const child = rig.axePivot.children[i];
+    if (child) {
+      child.visible = false;
+    }
+  }
+  const handTools = createHandToolsProp();
+  let equippedTool: EquippedTool = 'axe';
+  handTools.setTool(equippedTool);
+  rig.axePivot.add(handTools.group);
 
   let disposed = false;
   let proceduralRigDisposed = false;
@@ -1510,6 +1671,28 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       chestFlashlight.group.scale.setScalar(1);
     }
 
+    // Detach switchable Felling Axe / Pickaxe prop before disposing procedural rig, then mount onto hand_R
+    handTools.group.removeFromParent();
+    const handBone =
+      loaded.scene.getObjectByName('hand_R') ??
+      loaded.scene.getObjectByName('wrist_R') ??
+      loaded.scene.getObjectByName('lowerarm_R');
+    if (handBone) {
+      const handWorldScale = new THREE.Vector3(1, 1, 1);
+      handBone.getWorldScale(handWorldScale);
+      const invHandScale =
+        Number.isFinite(handWorldScale.x) && handWorldScale.x > 1e-4 ? 1 / handWorldScale.x : 1;
+      handTools.group.position.set(0, 0.045 * invHandScale, 0);
+      handTools.group.rotation.set(Math.PI * 0.5, 0, 0);
+      handTools.group.scale.setScalar(invHandScale);
+      handBone.add(handTools.group);
+    } else {
+      handTools.group.position.set(0.32, 0.96, -0.18);
+      handTools.group.rotation.set(0.85, 0, 0);
+      handTools.group.scale.setScalar(1);
+      wrapper.add(handTools.group);
+    }
+
     // Resume any in-flight airborne, landing, throw, or melee action seamlessly if GLB loads mid-action
     if (isAirborne && jumpStartAction) {
       jumpStartAction.reset();
@@ -1681,7 +1864,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
     throwReleasePending = false;
 
     // Reconcile elevation against terrain before launching so fast uphill sprints never start underground
-    const launchGroundY = getTerrainHeight(position.x, position.z);
+    const launchGroundY = sampleSupportHeight(position.x, position.z);
     if (position.y < launchGroundY) {
       position.y = launchGroundY;
       groundedY = launchGroundY;
@@ -1890,7 +2073,17 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       case 'KeyF':
         event.preventDefault();
         if (!event.repeat) {
-          triggerAttack();
+          if (isBuildMode && isBuildMode()) {
+            onBuildPrimary?.();
+          } else {
+            triggerAttack();
+          }
+        }
+        break;
+      case 'Enter':
+        if (!event.repeat && isBuildMode && isBuildMode()) {
+          event.preventDefault();
+          onBuildPrimary?.();
         }
         break;
       case 'KeyE':
@@ -1903,19 +2096,97 @@ export function createPlayerController(options: PlayerControllerOptions): Player
           triggerThrow();
         }
         break;
+      case 'Tab':
+        event.preventDefault();
+        if (!event.repeat && onToggleBuildMode) {
+          onToggleBuildMode();
+        }
+        break;
+      case 'F5':
+        event.preventDefault();
+        if (!event.repeat && onQuickSave) {
+          onQuickSave();
+        }
+        break;
+      case 'KeyR':
+        if (!event.repeat && isBuildMode && isBuildMode() && onBuildRotate) {
+          onBuildRotate();
+        }
+        break;
+      case 'KeyX':
+        if (!event.repeat && isBuildMode && isBuildMode() && onBuildDismantle) {
+          onBuildDismantle();
+        }
+        break;
+      case 'KeyZ':
+        if (!event.repeat && onCycleWorkbenchRecipe) {
+          onCycleWorkbenchRecipe();
+        }
+        break;
+      case 'KeyQ':
+        if (!event.repeat && onSelectTool) {
+          const nextTool: EquippedTool =
+            equippedTool === 'axe' ? 'pickaxe' : equippedTool === 'pickaxe' ? 'fists' : 'axe';
+          onSelectTool(nextTool);
+        }
+        break;
       case 'Digit1':
-        if (!event.repeat && onQuickUse) {
-          onQuickUse(1);
+        if (!event.repeat) {
+          if (isBuildMode && isBuildMode()) {
+            onBuildSelectIndex?.(0);
+          } else if (onQuickUse) {
+            onQuickUse(1);
+          }
         }
         break;
       case 'Digit2':
-        if (!event.repeat && onQuickUse) {
-          onQuickUse(2);
+        if (!event.repeat) {
+          if (isBuildMode && isBuildMode()) {
+            onBuildSelectIndex?.(1);
+          } else if (onQuickUse) {
+            onQuickUse(2);
+          }
         }
         break;
       case 'Digit3':
-        if (!event.repeat && onQuickUse) {
-          onQuickUse(3);
+        if (!event.repeat) {
+          if (isBuildMode && isBuildMode()) {
+            onBuildSelectIndex?.(2);
+          } else if (onQuickUse) {
+            onQuickUse(3);
+          }
+        }
+        break;
+      case 'Digit4':
+        if (!event.repeat) {
+          if (isBuildMode && isBuildMode()) {
+            onBuildSelectIndex?.(3);
+          } else if (onSelectTool) {
+            onSelectTool('axe');
+          }
+        }
+        break;
+      case 'Digit5':
+        if (!event.repeat) {
+          if (isBuildMode && isBuildMode()) {
+            onBuildSelectIndex?.(4);
+          } else if (onSelectTool) {
+            onSelectTool('pickaxe');
+          }
+        }
+        break;
+      case 'Digit6':
+        if (!event.repeat) {
+          if (isBuildMode && isBuildMode()) {
+            onBuildSelectIndex?.(5);
+          } else if (onSelectTool) {
+            onSelectTool('fists');
+          }
+        }
+        break;
+      case 'Digit7':
+        if (!event.repeat && isBuildMode && isBuildMode() && onBuildSelectIndex) {
+          onBuildSelectIndex(6);
         }
         break;
       case 'KeyL':
@@ -1983,40 +2254,105 @@ export function createPlayerController(options: PlayerControllerOptions): Player
     }
   };
 
+  let wasPointerLocked = false;
+  let unlockedLeftDown = false;
+  let dragOriginX = 0;
+  let dragOriginY = 0;
+  let dragDistanceSq = 0;
+
   const handleMouseMove = (event: MouseEvent): void => {
-    if (!pointerLocked || !inputEnabled) {
+    if (!inputEnabled) {
+      return;
+    }
+    if (unlockedLeftDown) {
+      const dx = event.clientX - dragOriginX;
+      const dy = event.clientY - dragOriginY;
+      const dSq = dx * dx + dy * dy;
+      if (dSq > dragDistanceSq) {
+        dragDistanceSq = dSq;
+      }
+    }
+    const dragLooking = !pointerLocked && ((event.buttons & 1) !== 0 || (event.buttons & 2) !== 0);
+    if (!pointerLocked && !dragLooking) {
       return;
     }
     const clampedX = clamp(event.movementX, -150, 150);
     const clampedY = clamp(event.movementY, -150, 150);
-    const sensitivity = 0.0022;
+    const sensitivity = pointerLocked ? 0.0022 : 0.0032;
     cameraYaw -= clampedX * sensitivity;
     cameraPitch = clamp(cameraPitch - clampedY * sensitivity, -0.64, 0.54);
   };
 
   const handleMouseDown = (event: MouseEvent): void => {
-    if (event.button === 0 && inputEnabled && pointerLocked) {
-      triggerAttack();
+    if (event.button !== 0 || !inputEnabled) {
+      return;
+    }
+    if (pointerLocked) {
+      if (isBuildMode && isBuildMode()) {
+        onBuildPrimary?.();
+      } else {
+        triggerAttack();
+      }
+      return;
+    }
+    if (event.target === canvas) {
+      unlockedLeftDown = true;
+      dragOriginX = event.clientX;
+      dragOriginY = event.clientY;
+      dragDistanceSq = 0;
+    }
+  };
+
+  const handleMouseUp = (event: MouseEvent): void => {
+    if (event.button !== 0 || !unlockedLeftDown) {
+      return;
+    }
+    unlockedLeftDown = false;
+    if (inputEnabled && !pointerLocked && isBuildMode && isBuildMode() && dragDistanceSq < 25) {
+      onBuildPrimary?.();
+    }
+  };
+
+  const handleWheel = (event: WheelEvent): void => {
+    if (inputEnabled && isBuildMode && isBuildMode() && onBuildCycle) {
+      event.preventDefault();
+      onBuildCycle(event.deltaY >= 0 ? 1 : -1);
+    }
+  };
+
+  const handleContextMenu = (event: MouseEvent): void => {
+    if (inputEnabled) {
+      event.preventDefault();
     }
   };
 
   const handlePointerLockChange = (): void => {
-    pointerLocked = document.pointerLockElement === canvas;
-    if (!pointerLocked) {
-      keys.forward = false;
-      keys.backward = false;
-      keys.left = false;
-      keys.right = false;
-      keys.sprint = false;
-      keys.walkSlow = false;
-      keys.crouchHold = false;
+    const nextLocked = document.pointerLockElement === canvas;
+    pointerLocked = nextLocked;
+    unlockedLeftDown = false;
+    if (nextLocked) {
+      wasPointerLocked = true;
+      if (onPointerLockChange) {
+        onPointerLockChange(true);
+      }
+      return;
     }
-    if (onPointerLockChange) {
-      onPointerLockChange(pointerLocked);
+    const hadLock = wasPointerLocked;
+    wasPointerLocked = false;
+    keys.forward = false;
+    keys.backward = false;
+    keys.left = false;
+    keys.right = false;
+    keys.sprint = false;
+    keys.walkSlow = false;
+    keys.crouchHold = false;
+    if (hadLock && onPointerLockChange) {
+      onPointerLockChange(false);
     }
   };
 
   const handleBlur = (): void => {
+    unlockedLeftDown = false;
     keys.forward = false;
     keys.backward = false;
     keys.left = false;
@@ -2030,6 +2366,9 @@ export function createPlayerController(options: PlayerControllerOptions): Player
   window.addEventListener('keyup', handleKeyUp);
   window.addEventListener('mousemove', handleMouseMove);
   window.addEventListener('mousedown', handleMouseDown);
+  window.addEventListener('mouseup', handleMouseUp);
+  window.addEventListener('wheel', handleWheel, { passive: false });
+  canvas.addEventListener('contextmenu', handleContextMenu);
   window.addEventListener('blur', handleBlur);
   document.addEventListener('pointerlockchange', handlePointerLockChange);
 
@@ -2104,7 +2443,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       scratchCamProbe2D.x = px;
       scratchCamProbe2D.z = pz;
       const hitObs = resolveHorizontalCollision(scratchCamProbe2D, 0.3, obstacles);
-      const probeGroundY = getTerrainHeight(px, pz);
+      const probeGroundY = sampleSupportHeight(px, pz);
 
       if (hitObs || py < probeGroundY + 0.3) {
         safeDist = Math.max(0.35, dist - 0.25);
@@ -2118,7 +2457,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       scratchCamTarget.z + scratchBack.z * safeDist,
     );
 
-    const camGroundY = getTerrainHeight(scratchCamDesired.x, scratchCamDesired.z);
+    const camGroundY = sampleSupportHeight(scratchCamDesired.x, scratchCamDesired.z);
     if (scratchCamDesired.y < camGroundY + 0.36) {
       scratchCamDesired.y = camGroundY + 0.36;
     }
@@ -2165,6 +2504,10 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       flashlightActive = active;
       chestFlashlight.setActive(active);
     },
+    setEquippedTool(tool: EquippedTool): void {
+      equippedTool = tool;
+      handTools.setTool(tool);
+    },
     getFlashlightTransform(outOrigin: THREE.Vector3, outDir: THREE.Vector3): void {
       chestFlashlight.lensAnchor.updateWorldMatrix(true, false);
       chestFlashlight.lensAnchor.getWorldPosition(outOrigin);
@@ -2174,6 +2517,11 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       const beamPitch = clamp(cameraPitch, -0.6, 0.48);
       const cosP = Math.cos(beamPitch);
       outDir.set(-Math.sin(beamYaw) * cosP, Math.sin(beamPitch), -Math.cos(beamYaw) * cosP);
+    },
+    getCameraRay(outOrigin: THREE.Vector3, outDir: THREE.Vector3): void {
+      outOrigin.copy(camera.position);
+      const cosP = Math.cos(cameraPitch);
+      outDir.set(-Math.sin(cameraYaw) * cosP, Math.sin(cameraPitch), -Math.cos(cameraYaw) * cosP);
     },
     getStance(): PlayerStance {
       return currentStance;
@@ -2201,10 +2549,24 @@ export function createPlayerController(options: PlayerControllerOptions): Player
     triggerHitShake(intensity: number): void {
       hitShake = clamp(Math.max(hitShake, intensity), 0, 1.2);
     },
+    setPositionAndYaw(x: number, z: number, yaw: number): void {
+      const targetY = sampleSupportHeight(x, z);
+      position.set(x, targetY, z);
+      groundedY = targetY;
+      smoothedCamY = targetY;
+      airHeight = 0;
+      verticalVelocity = 0;
+      isAirborne = false;
+      cameraYaw = yaw;
+      characterYaw = yaw;
+      root.position.copy(position);
+      root.rotation.y = characterYaw;
+      initCameraTransform();
+    },
     resetToSpawn(targetX?: number, targetZ?: number): void {
       const spawnX = targetX ?? SPAWN_POINT.x;
       const spawnZ = targetZ ?? SPAWN_POINT.z;
-      const resetY = getTerrainHeight(spawnX, spawnZ);
+      const resetY = sampleSupportHeight(spawnX, spawnZ);
       position.set(spawnX, resetY, spawnZ);
       flashlightActive = false;
       chestFlashlight.setActive(false);
@@ -2565,7 +2927,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       smoothedActualSpeed += (instantActualSpeed - smoothedActualSpeed) * Math.min(1, dt * 16);
 
       // Vertical terrain follow & ballistic jump physics
-      const targetGroundY = getTerrainHeight(position.x, position.z);
+      const targetGroundY = sampleSupportHeight(position.x, position.z);
       if (isAirborne) {
         airElapsed += dt;
         verticalVelocity -= GRAVITY * dt;
@@ -3091,11 +3453,15 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mousedown', handleMouseDown);
+      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('wheel', handleWheel);
+      canvas.removeEventListener('contextmenu', handleContextMenu);
       window.removeEventListener('blur', handleBlur);
       document.removeEventListener('pointerlockchange', handlePointerLockChange);
       scene.remove(root);
-      // Dispose chest flashlight once after detaching so GLB/procedural cleanup never double-disposes it
+      // Dispose chest flashlight & hand tools once after detaching so GLB/procedural cleanup never double-disposes them
       chestFlashlight.dispose();
+      handTools.dispose();
       if (glbState) {
         glbState.mixer.stopAllAction();
         glbState.mixer.uncacheRoot(glbState.scene);

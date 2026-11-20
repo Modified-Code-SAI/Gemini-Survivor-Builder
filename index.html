@@ -3,6 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>Overgrown Frontier</title>
     <style>
       :root {
@@ -170,6 +173,16 @@
         border-color: #f0c078;
       }
 
+      .btn-danger {
+        border-color: rgba(208, 92, 78, 0.48);
+        color: #f4d3cd;
+      }
+
+      .btn-danger:hover {
+        background: rgba(74, 24, 20, 0.72);
+        border-color: rgba(232, 112, 96, 0.78);
+      }
+
       .overlay-footer {
         display: flex;
         flex-wrap: wrap;
@@ -287,7 +300,7 @@
       .hud-center-prompts {
         position: fixed;
         left: 50%;
-        bottom: 92px;
+        bottom: 108px;
         transform: translateX(-50%);
         display: flex;
         flex-direction: column;
@@ -295,6 +308,11 @@
         gap: 10px;
         pointer-events: none;
         z-index: 7;
+        transition: bottom 0.18s ease;
+      }
+
+      body.build-mode-active .hud-center-prompts {
+        bottom: 232px;
       }
 
       #loot-toast {
@@ -495,19 +513,34 @@
         background: #c85247;
       }
 
-      /* Discreet quick-use supply belt */
-      .supply-belt {
+      /* Discreet quick-use supply & tool belt */
+      .belt-stack {
         display: flex;
+        flex-direction: column;
         align-items: center;
-        gap: 8px;
-        padding: 7px 11px;
-        background: rgba(11, 16, 12, 0.52);
+        gap: 6px;
+      }
+
+      .supply-belt,
+      .tool-belt {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 10px;
+        background: rgba(11, 16, 12, 0.54);
         border: 1px solid rgba(214, 185, 134, 0.2);
         border-radius: 3px;
         backdrop-filter: blur(6px);
       }
 
-      .supply-slot {
+      .tool-belt {
+        padding: 4px 9px;
+      }
+
+      .supply-slot,
+      .tool-slot {
         display: inline-flex;
         align-items: center;
         gap: 5px;
@@ -518,6 +551,13 @@
         letter-spacing: 0.08em;
         text-transform: uppercase;
         color: rgba(235, 224, 200, 0.85);
+        border: 1px solid transparent;
+      }
+
+      .tool-slot.active {
+        border-color: rgba(217, 164, 91, 0.7);
+        background: rgba(92, 66, 30, 0.58);
+        color: #fff2d6;
       }
 
       .supply-slot.empty {
@@ -529,12 +569,124 @@
         color: #f6e6c5;
       }
 
+      /* Translucent snap-building HUD bar (visible only while in [Tab] Build Mode) */
+      #build-bar {
+        position: fixed;
+        left: 50%;
+        bottom: 132px;
+        transform: translateX(-50%) translateY(8px);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        padding: 9px 12px;
+        background: rgba(10, 16, 12, 0.78);
+        border: 1px solid rgba(114, 212, 146, 0.45);
+        border-radius: 4px;
+        backdrop-filter: blur(8px);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.52);
+        pointer-events: none;
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.18s ease, transform 0.18s ease, visibility 0.18s ease;
+        z-index: 8;
+        max-width: 94vw;
+      }
+
+      #build-bar.visible {
+        opacity: 1;
+        visibility: visible;
+        transform: translateX(-50%) translateY(0);
+      }
+
+      .build-bar-pieces {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 6px;
+      }
+
+      .build-slot {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 2px;
+        padding: 5px 8px;
+        border-radius: 3px;
+        border: 1px solid rgba(214, 185, 134, 0.22);
+        background: rgba(20, 28, 22, 0.62);
+        min-width: 96px;
+      }
+
+      .build-slot.selected {
+        border-color: rgba(88, 228, 142, 0.88);
+        background: rgba(28, 66, 44, 0.76);
+      }
+
+      .build-slot.unaffordable {
+        opacity: 0.52;
+      }
+
+      .build-slot.selected.unaffordable {
+        border-color: rgba(226, 94, 82, 0.85);
+        background: rgba(74, 24, 20, 0.72);
+        opacity: 0.92;
+      }
+
+      .build-slot-name {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: #f4ecdb;
+      }
+
+      .build-slot-cost {
+        font-size: 9px;
+        letter-spacing: 0.08em;
+        color: rgba(235, 224, 200, 0.75);
+      }
+
+      .build-bar-help {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 10px;
+        font-size: 10px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: rgba(215, 232, 214, 0.82);
+      }
+
+      /* Compact workbench recipe strip shown only while facing a placed Workbench */
+      #workbench-bar {
+        display: none;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 12px;
+        background: rgba(12, 18, 13, 0.74);
+        border: 1px solid rgba(217, 164, 91, 0.42);
+        border-radius: 3px;
+        font-size: 10px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: #f3e4c3;
+        backdrop-filter: blur(6px);
+      }
+
+      #workbench-bar.visible {
+        display: inline-flex;
+      }
+
       .hud-controls-compact {
         display: flex;
         flex-wrap: wrap;
         justify-content: flex-end;
-        gap: 10px;
-        max-width: 420px;
+        gap: 8px;
+        max-width: 430px;
       }
 
       /* Subtle center dot when pointer-locked */
@@ -637,14 +789,17 @@
           <h1 class="game-title">Overgrown<br />Frontier</h1>
           <p class="subtitle">
             Reclaimed pines, fractured asphalt, and rusted remnants beneath a shifting Pacific sky.
-            Stay low in the ferns, scavenge scrap and supplies, build campfires and shelters, and
-            survive the living night.
+            Harvest timber and stone, snap together fortified cabins and spikes, scavenge Highway 9,
+            and survive the living night.
           </p>
           <div id="webgl-error" role="alert"></div>
           <div class="overlay-actions">
             <button id="btn-explore" class="btn btn-primary" type="button">Click to Explore</button>
             <button id="btn-quality" class="btn" type="button">Graphics: High</button>
             <button id="btn-audio" class="btn" type="button">Audio: On</button>
+            <button id="btn-reset-world" class="btn btn-danger" type="button" style="display: none">
+              Reset World
+            </button>
           </div>
         </div>
 
@@ -652,23 +807,20 @@
           <div class="key-hints">
             <span class="key-hint"><span class="keycap">W A S D</span> Move</span>
             <span class="key-hint"><span class="keycap">Mouse</span> Look</span>
-            <span class="key-hint"><span class="keycap">Alt</span> Walk</span>
             <span class="key-hint"><span class="keycap">Shift</span> Run</span>
-            <span class="key-hint"><span class="keycap">C / Ctrl</span> Crouch</span>
+            <span class="key-hint"><span class="keycap">C</span> Crouch</span>
             <span class="key-hint"><span class="keycap">Space</span> Jump</span>
-            <span class="key-hint"><span class="keycap">Click / F</span> Attack</span>
-            <span class="key-hint"><span class="keycap">E</span> Scavenge</span>
-            <span class="key-hint"><span class="keycap">G</span> Throw Bottle</span>
+            <span class="key-hint"><span class="keycap">Click / F</span> Swing / Harvest</span>
+            <span class="key-hint"><span class="keycap">4–6 / Q</span> Tools</span>
+            <span class="key-hint"><span class="keycap">Tab</span> Build Mode</span>
+            <span class="key-hint"><span class="keycap">E</span> Interact</span>
+            <span class="key-hint"><span class="keycap">G</span> Bottle</span>
             <span class="key-hint"><span class="keycap">L</span> Light</span>
-            <span class="key-hint"><span class="keycap">B</span> Fire (2)</span>
-            <span class="key-hint"><span class="keycap">V</span> Shelter (4)</span>
-            <span class="key-hint"><span class="keycap">T</span> Time</span>
-            <span class="key-hint"><span class="keycap">Y</span> Storm</span>
-            <span class="key-hint"><span class="keycap">1–3</span> Supplies</span>
-            <span class="key-hint"><span class="keycap">M</span> Mute</span>
+            <span class="key-hint"><span class="keycap">B / V</span> Camp</span>
+            <span class="key-hint"><span class="keycap">F5</span> Save</span>
             <span class="key-hint"><span class="keycap">Esc</span> Pause</span>
           </div>
-          <div>Milestone 4 · Survive &amp; Build Your Camp</div>
+          <div>Modular Survival Builder · Phase 1</div>
         </div>
       </div>
 
@@ -689,9 +841,54 @@
 
         <div class="hud-center-prompts">
           <div id="loot-toast" aria-live="polite"></div>
+          <div id="workbench-bar">
+            <span>Workbench</span>
+            <span id="workbench-recipe-label">Ration (1W 1Sc)</span>
+            <span><span class="keycap">Z</span> Switch</span>
+          </div>
           <div id="scavenge-prompt">
             <span class="keycap">E</span>
             <span id="scavenge-prompt-label">Search Container</span>
+          </div>
+        </div>
+
+        <div id="build-bar">
+          <div class="build-bar-pieces">
+            <div id="build-slot-0" class="build-slot selected">
+              <span class="build-slot-name"><span class="keycap">1</span> Foundation</span>
+              <span class="build-slot-cost">4 Wood · 1 Stone</span>
+            </div>
+            <div id="build-slot-1" class="build-slot">
+              <span class="build-slot-name"><span class="keycap">2</span> Wall</span>
+              <span class="build-slot-cost">3 Wood</span>
+            </div>
+            <div id="build-slot-2" class="build-slot">
+              <span class="build-slot-name"><span class="keycap">3</span> Doorway</span>
+              <span class="build-slot-cost">3 Wood · 1 Scrap</span>
+            </div>
+            <div id="build-slot-3" class="build-slot">
+              <span class="build-slot-name"><span class="keycap">4</span> Roof</span>
+              <span class="build-slot-cost">3 Wood</span>
+            </div>
+            <div id="build-slot-4" class="build-slot">
+              <span class="build-slot-name"><span class="keycap">5</span> Spikes</span>
+              <span class="build-slot-cost">2 Wood · 1 Scrap</span>
+            </div>
+            <div id="build-slot-5" class="build-slot">
+              <span class="build-slot-name"><span class="keycap">6</span> Storage</span>
+              <span class="build-slot-cost">3 Wood · 1 Scrap</span>
+            </div>
+            <div id="build-slot-6" class="build-slot">
+              <span class="build-slot-name"><span class="keycap">7</span> Workbench</span>
+              <span class="build-slot-cost">4W · 2St · 2Sc</span>
+            </div>
+          </div>
+          <div class="build-bar-help">
+            <span><span class="keycap">Click</span> Place</span>
+            <span><span class="keycap">R</span> Rotate</span>
+            <span><span class="keycap">X</span> Dismantle (50%)</span>
+            <span><span class="keycap">1–7 / Scroll</span> Piece</span>
+            <span><span class="keycap">Tab</span> Exit Build</span>
           </div>
         </div>
 
@@ -725,21 +922,35 @@
             </div>
           </div>
 
-          <div class="supply-belt">
-            <div id="slot-rations" class="supply-slot empty">
-              <span class="keycap">1</span> Ration <span id="inv-rations" class="supply-count">0</span>
+          <div class="belt-stack">
+            <div class="supply-belt">
+              <div id="slot-rations" class="supply-slot empty">
+                <span class="keycap">1</span> Ration <span id="inv-rations" class="supply-count">0</span>
+              </div>
+              <div id="slot-medkits" class="supply-slot empty">
+                <span class="keycap">2</span> Medkit <span id="inv-medkits" class="supply-count">0</span>
+              </div>
+              <div id="slot-warmers" class="supply-slot empty">
+                <span class="keycap">3</span> Warmer <span id="inv-warmers" class="supply-count">0</span>
+              </div>
+              <div id="slot-bottles" class="supply-slot empty">
+                <span class="keycap">G</span> Bottle <span id="inv-bottles" class="supply-count">0</span>
+              </div>
+              <div id="slot-wood" class="supply-slot empty">
+                Wood <span id="inv-wood" class="supply-count">0</span>
+              </div>
+              <div id="slot-stone" class="supply-slot empty">
+                Stone <span id="inv-stone" class="supply-count">0</span>
+              </div>
+              <div id="slot-scrap" class="supply-slot empty">
+                Scrap <span id="inv-scrap" class="supply-count">0</span>
+              </div>
             </div>
-            <div id="slot-medkits" class="supply-slot empty">
-              <span class="keycap">2</span> Medkit <span id="inv-medkits" class="supply-count">0</span>
-            </div>
-            <div id="slot-warmers" class="supply-slot empty">
-              <span class="keycap">3</span> Warmer <span id="inv-warmers" class="supply-count">0</span>
-            </div>
-            <div id="slot-bottles" class="supply-slot empty">
-              <span class="keycap">G</span> Bottle <span id="inv-bottles" class="supply-count">0</span>
-            </div>
-            <div id="slot-scrap" class="supply-slot empty">
-              Scrap <span id="inv-scrap" class="supply-count">0</span>
+            <div class="tool-belt">
+              <div id="tool-axe" class="tool-slot active"><span class="keycap">4</span> Axe</div>
+              <div id="tool-pickaxe" class="tool-slot"><span class="keycap">5</span> Pickaxe</div>
+              <div id="tool-fists" class="tool-slot"><span class="keycap">6</span> Fists</div>
+              <div class="tool-slot"><span class="keycap">Tab</span> Build</div>
             </div>
           </div>
 
@@ -747,15 +958,15 @@
             <span class="key-hint"><span class="keycap">WASD</span> Move</span>
             <span class="key-hint"><span class="keycap">Shift</span> Run</span>
             <span class="key-hint"><span class="keycap">C</span> Crouch</span>
-            <span class="key-hint"><span class="keycap">Space</span> Jump</span>
-            <span class="key-hint"><span class="keycap">Click/F</span> Attack</span>
-            <span class="key-hint"><span class="keycap">E</span> Loot</span>
-            <span class="key-hint"><span class="keycap">G</span> Bottle</span>
+            <span class="key-hint"><span class="keycap">Click/F</span> Harvest/Hit</span>
+            <span class="key-hint"><span class="keycap">Q</span> Tool</span>
+            <span class="key-hint"><span class="keycap">Tab</span> Build</span>
+            <span class="key-hint"><span class="keycap">E</span> Interact</span>
             <span class="key-hint"><span class="keycap">L</span> Light</span>
             <span class="key-hint"><span class="keycap">B</span> Fire(2)</span>
             <span class="key-hint"><span class="keycap">V</span> Shelter(4)</span>
-            <span class="key-hint"><span class="keycap">T</span> Time</span>
-            <span class="key-hint"><span class="keycap">Y</span> Storm</span>
+            <span class="key-hint"><span class="keycap">F5</span> Save</span>
+            <span class="key-hint"><span class="keycap">T/Y</span> Sky</span>
           </div>
         </div>
       </div>

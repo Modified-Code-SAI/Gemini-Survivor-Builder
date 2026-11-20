@@ -35,6 +35,8 @@ export interface ScavengeSystem {
   ): ScavengePromptTarget | null;
   scavengeTarget(id: string): ScavengeResult | null;
   getStats(): ScavengeStats;
+  serializeLootedIds(): string[];
+  hydrateLootedIds(ids: readonly string[]): void;
   reset(): void;
   dispose(): void;
 }
@@ -537,20 +539,24 @@ export function createScavengeSystem(): ScavengeSystem {
     return scratchPrompt;
   }
 
+  function markNodeLootedVisual(node: ScavengeNode): void {
+    node.looted = true;
+    lootedCount += 1;
+    node.glint.visible = false;
+    node.glintMat.opacity = 0;
+    // Visually open/offset the lid to show the cache has been searched
+    node.lid.rotation.x = node.lidClosedRotX - 1.15;
+    node.lid.position.y = node.lidClosedPosY + 0.04;
+    node.lid.visible = node.spec.visual === 'crate' || node.spec.visual === 'toolbox';
+  }
+
   function scavengeTarget(id: string): ScavengeResult | null {
     for (let i = 0; i < nodes.length; i += 1) {
       const node = nodes[i];
       if (!node || node.spec.id !== id || node.looted) {
         continue;
       }
-      node.looted = true;
-      lootedCount += 1;
-      node.glint.visible = false;
-      node.glintMat.opacity = 0;
-      // Visually open/offset the lid to show the cache has been searched
-      node.lid.rotation.x = node.lidClosedRotX - 1.15;
-      node.lid.position.y = node.lidClosedPosY + 0.04;
-      node.lid.visible = node.spec.visual === 'crate' || node.spec.visual === 'toolbox';
+      markNodeLootedVisual(node);
       return {
         id: node.spec.id,
         label: node.spec.label,
@@ -558,6 +564,31 @@ export function createScavengeSystem(): ScavengeSystem {
       };
     }
     return null;
+  }
+
+  function serializeLootedIds(): string[] {
+    const ids: string[] = [];
+    for (let i = 0; i < nodes.length; i += 1) {
+      const node = nodes[i];
+      if (node && node.looted) {
+        ids.push(node.spec.id);
+      }
+    }
+    return ids;
+  }
+
+  function hydrateLootedIds(ids: readonly string[]): void {
+    reset();
+    if (ids.length === 0) {
+      return;
+    }
+    const idSet = new Set(ids);
+    for (let i = 0; i < nodes.length; i += 1) {
+      const node = nodes[i];
+      if (node && idSet.has(node.spec.id)) {
+        markNodeLootedVisual(node);
+      }
+    }
   }
 
   function getStats(): ScavengeStats {
@@ -599,6 +630,8 @@ export function createScavengeSystem(): ScavengeSystem {
     getPromptTarget,
     scavengeTarget,
     getStats,
+    serializeLootedIds,
+    hydrateLootedIds,
     reset,
     dispose,
   };

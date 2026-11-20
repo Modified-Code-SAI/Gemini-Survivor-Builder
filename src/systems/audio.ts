@@ -31,6 +31,12 @@ export interface FrontierAudio {
   playFlashlightClick(on: boolean): void;
   playStalkerSound(kind: 'prowl' | 'shriek' | 'recoil'): void;
   playBuildCamp(kind: 'campfire' | 'shelter'): void;
+  playWoodChop(felled: boolean): void;
+  playRockMine(shattered: boolean): void;
+  playBuildPiece(): void;
+  playDismantle(): void;
+  playDoorToggle(open: boolean): void;
+  playSpikeHit(): void;
   update(elapsed: number, dt: number, spatial?: SpatialAudioState): void;
   dispose(): void;
 }
@@ -1676,6 +1682,358 @@ export function createFrontierAudio(): FrontierAudio {
     tarpSrc.stop(tarpStart + 0.28);
   }
 
+  function playWoodChop(felled: boolean): void {
+    if (!ctx || !masterGain || !noiseBurstBuffer || muted || ctx.state !== 'running') {
+      return;
+    }
+    const now = ctx.currentTime;
+    const jitter = 0.92 + Math.random() * 0.16;
+
+    // Resonant axe-bite timber body thump
+    const woodOsc = ctx.createOscillator();
+    const woodGain = ctx.createGain();
+    woodOsc.type = 'triangle';
+    woodOsc.frequency.setValueAtTime(195 * jitter, now);
+    woodOsc.frequency.exponentialRampToValueAtTime(64 * jitter, now + 0.11);
+    woodGain.gain.setValueAtTime(0.0001, now);
+    woodGain.gain.linearRampToValueAtTime(0.28, now + 0.006);
+    woodGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.13);
+    woodOsc.connect(woodGain);
+    woodGain.connect(masterGain);
+    woodOsc.onended = () => {
+      safeDisconnect(woodOsc);
+      safeDisconnect(woodGain);
+    };
+    woodOsc.start(now);
+    woodOsc.stop(now + 0.15);
+
+    // Crisp cedar wood-chip splinter burst
+    const chipSrc = ctx.createBufferSource();
+    chipSrc.buffer = noiseBurstBuffer;
+    const chipBp = ctx.createBiquadFilter();
+    chipBp.type = 'bandpass';
+    chipBp.frequency.setValueAtTime(1180 * jitter, now);
+    chipBp.Q.value = 1.9;
+    const chipGain = ctx.createGain();
+    chipGain.gain.setValueAtTime(0.0001, now);
+    chipGain.gain.linearRampToValueAtTime(0.21, now + 0.005);
+    chipGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+    chipSrc.connect(chipBp);
+    chipBp.connect(chipGain);
+    chipGain.connect(masterGain);
+    chipSrc.onended = () => {
+      safeDisconnect(chipSrc);
+      safeDisconnect(chipBp);
+      safeDisconnect(chipGain);
+    };
+    chipSrc.start(now);
+    chipSrc.stop(now + 0.14);
+
+    if (felled) {
+      // Deep timber fiber crack followed by heavy pine-fall crash
+      const crackStart = now + 0.11;
+      const crackOsc = ctx.createOscillator();
+      const crackFilter = ctx.createBiquadFilter();
+      const crackGain = ctx.createGain();
+      crackOsc.type = 'sawtooth';
+      crackOsc.frequency.setValueAtTime(145, crackStart);
+      crackOsc.frequency.exponentialRampToValueAtTime(72, crackStart + 0.36);
+      crackFilter.type = 'bandpass';
+      crackFilter.frequency.value = 390;
+      crackFilter.Q.value = 3.5;
+      crackGain.gain.setValueAtTime(0.0001, crackStart);
+      crackGain.gain.linearRampToValueAtTime(0.14, crackStart + 0.08);
+      crackGain.gain.exponentialRampToValueAtTime(0.0001, crackStart + 0.38);
+      crackOsc.connect(crackFilter);
+      crackFilter.connect(crackGain);
+      crackGain.connect(masterGain);
+      crackOsc.onended = () => {
+        safeDisconnect(crackOsc);
+        safeDisconnect(crackFilter);
+        safeDisconnect(crackGain);
+      };
+      crackOsc.start(crackStart);
+      crackOsc.stop(crackStart + 0.4);
+
+      const crashStart = now + 0.42;
+      const crashSrc = ctx.createBufferSource();
+      crashSrc.buffer = noiseBurstBuffer;
+      const crashLp = ctx.createBiquadFilter();
+      crashLp.type = 'lowpass';
+      crashLp.frequency.setValueAtTime(640, crashStart);
+      crashLp.frequency.exponentialRampToValueAtTime(160, crashStart + 0.4);
+      const crashGain = ctx.createGain();
+      crashGain.gain.setValueAtTime(0.0001, crashStart);
+      crashGain.gain.linearRampToValueAtTime(0.28, crashStart + 0.03);
+      crashGain.gain.exponentialRampToValueAtTime(0.0001, crashStart + 0.42);
+      crashSrc.connect(crashLp);
+      crashLp.connect(crashGain);
+      crashGain.connect(masterGain);
+      crashSrc.onended = () => {
+        safeDisconnect(crashSrc);
+        safeDisconnect(crashLp);
+        safeDisconnect(crashGain);
+      };
+      crashSrc.start(crashStart);
+      crashSrc.stop(crashStart + 0.43);
+    }
+  }
+
+  function playRockMine(shattered: boolean): void {
+    if (!ctx || !masterGain || !noiseBurstBuffer || muted || ctx.state !== 'running') {
+      return;
+    }
+    const now = ctx.currentTime;
+    const jitter = 0.94 + Math.random() * 0.14;
+
+    // Metallic pickaxe steel-on-granite ring clink
+    const clinkOsc = ctx.createOscillator();
+    const clinkGain = ctx.createGain();
+    clinkOsc.type = 'triangle';
+    clinkOsc.frequency.setValueAtTime(2420 * jitter, now);
+    clinkOsc.frequency.exponentialRampToValueAtTime(1420 * jitter, now + 0.12);
+    clinkGain.gain.setValueAtTime(0.0001, now);
+    clinkGain.gain.linearRampToValueAtTime(0.14, now + 0.003);
+    clinkGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.14);
+    clinkOsc.connect(clinkGain);
+    clinkGain.connect(masterGain);
+    clinkOsc.onended = () => {
+      safeDisconnect(clinkOsc);
+      safeDisconnect(clinkGain);
+    };
+    clinkOsc.start(now);
+    clinkOsc.stop(now + 0.16);
+
+    // Granite impact crunch
+    const crunchSrc = ctx.createBufferSource();
+    crunchSrc.buffer = noiseBurstBuffer;
+    const crunchBp = ctx.createBiquadFilter();
+    crunchBp.type = 'bandpass';
+    crunchBp.frequency.value = 1850 * jitter;
+    crunchBp.Q.value = 1.25;
+    const crunchGain = ctx.createGain();
+    crunchGain.gain.setValueAtTime(0.0001, now);
+    crunchGain.gain.linearRampToValueAtTime(shattered ? 0.26 : 0.18, now + 0.006);
+    crunchGain.gain.exponentialRampToValueAtTime(0.0001, now + (shattered ? 0.34 : 0.15));
+    crunchSrc.connect(crunchBp);
+    crunchBp.connect(crunchGain);
+    crunchGain.connect(masterGain);
+    crunchSrc.onended = () => {
+      safeDisconnect(crunchSrc);
+      safeDisconnect(crunchBp);
+      safeDisconnect(crunchGain);
+    };
+    crunchSrc.start(now);
+    crunchSrc.stop(now + (shattered ? 0.36 : 0.17));
+
+    if (shattered) {
+      // Heavy low boulder crumble collapse
+      const crumbleOsc = ctx.createOscillator();
+      const crumbleGain = ctx.createGain();
+      crumbleOsc.type = 'sine';
+      crumbleOsc.frequency.setValueAtTime(112, now + 0.04);
+      crumbleOsc.frequency.exponentialRampToValueAtTime(34, now + 0.34);
+      crumbleGain.gain.setValueAtTime(0.0001, now + 0.04);
+      crumbleGain.gain.linearRampToValueAtTime(0.28, now + 0.06);
+      crumbleGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.36);
+      crumbleOsc.connect(crumbleGain);
+      crumbleGain.connect(masterGain);
+      crumbleOsc.onended = () => {
+        safeDisconnect(crumbleOsc);
+        safeDisconnect(crumbleGain);
+      };
+      crumbleOsc.start(now + 0.04);
+      crumbleOsc.stop(now + 0.38);
+    }
+  }
+
+  function playBuildPiece(): void {
+    if (!ctx || !masterGain || !noiseBurstBuffer || muted || ctx.state !== 'running') {
+      return;
+    }
+    const now = ctx.currentTime;
+    // Double hammer-on-timber structural thump
+    for (let i = 0; i < 2; i += 1) {
+      const start = now + i * 0.11;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(i === 0 ? 156 : 188, start);
+      osc.frequency.exponentialRampToValueAtTime(48, start + 0.1);
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.linearRampToValueAtTime(i === 0 ? 0.24 : 0.2, start + 0.006);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.115);
+      osc.connect(gain);
+      gain.connect(masterGain);
+      osc.onended = () => {
+        safeDisconnect(osc);
+        safeDisconnect(gain);
+      };
+      osc.start(start);
+      osc.stop(start + 0.13);
+
+      const snap = ctx.createBufferSource();
+      snap.buffer = noiseBurstBuffer;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = i === 0 ? 780 : 1240;
+      bp.Q.value = 1.6;
+      const sGain = ctx.createGain();
+      sGain.gain.setValueAtTime(0.0001, start);
+      sGain.gain.linearRampToValueAtTime(0.14, start + 0.004);
+      sGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.07);
+      snap.connect(bp);
+      bp.connect(sGain);
+      sGain.connect(masterGain);
+      snap.onended = () => {
+        safeDisconnect(snap);
+        safeDisconnect(bp);
+        safeDisconnect(sGain);
+      };
+      snap.start(start);
+      snap.stop(start + 0.085);
+    }
+  }
+
+  function playDismantle(): void {
+    if (!ctx || !masterGain || !noiseBurstBuffer || muted || ctx.state !== 'running') {
+      return;
+    }
+    const now = ctx.currentTime;
+    // Hollow plank pry-loose crack + timber drop
+    const prySrc = ctx.createBufferSource();
+    prySrc.buffer = noiseBurstBuffer;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(1450, now);
+    bp.frequency.exponentialRampToValueAtTime(420, now + 0.18);
+    bp.Q.value = 1.8;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(0.2, now + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
+    prySrc.connect(bp);
+    bp.connect(gain);
+    gain.connect(masterGain);
+    prySrc.onended = () => {
+      safeDisconnect(prySrc);
+      safeDisconnect(bp);
+      safeDisconnect(gain);
+    };
+    prySrc.start(now);
+    prySrc.stop(now + 0.22);
+
+    const dropOsc = ctx.createOscillator();
+    const dropGain = ctx.createGain();
+    dropOsc.type = 'sine';
+    dropOsc.frequency.setValueAtTime(118, now + 0.08);
+    dropOsc.frequency.exponentialRampToValueAtTime(42, now + 0.22);
+    dropGain.gain.setValueAtTime(0.0001, now + 0.08);
+    dropGain.gain.linearRampToValueAtTime(0.19, now + 0.09);
+    dropGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.23);
+    dropOsc.connect(dropGain);
+    dropGain.connect(masterGain);
+    dropOsc.onended = () => {
+      safeDisconnect(dropOsc);
+      safeDisconnect(dropGain);
+    };
+    dropOsc.start(now + 0.08);
+    dropOsc.stop(now + 0.25);
+  }
+
+  function playDoorToggle(open: boolean): void {
+    if (!ctx || !masterGain || !noiseBurstBuffer || muted || ctx.state !== 'running') {
+      return;
+    }
+    const now = ctx.currentTime;
+    // Iron hinge creak
+    const osc = ctx.createOscillator();
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(open ? 230 : 310, now);
+    osc.frequency.exponentialRampToValueAtTime(open ? 345 : 195, now + 0.24);
+    filter.type = 'bandpass';
+    filter.frequency.value = 620;
+    filter.Q.value = 5.5;
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(0.068, now + 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.26);
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(masterGain);
+    osc.onended = () => {
+      safeDisconnect(osc);
+      safeDisconnect(filter);
+      safeDisconnect(gain);
+    };
+    osc.start(now);
+    osc.stop(now + 0.28);
+
+    // Timber latch clack
+    const clackStart = open ? now : now + 0.19;
+    const latchOsc = ctx.createOscillator();
+    const latchGain = ctx.createGain();
+    latchOsc.type = 'triangle';
+    latchOsc.frequency.setValueAtTime(open ? 520 : 185, clackStart);
+    latchOsc.frequency.exponentialRampToValueAtTime(open ? 210 : 72, clackStart + 0.055);
+    latchGain.gain.setValueAtTime(0.0001, clackStart);
+    latchGain.gain.linearRampToValueAtTime(0.14, clackStart + 0.005);
+    latchGain.gain.exponentialRampToValueAtTime(0.0001, clackStart + 0.065);
+    latchOsc.connect(latchGain);
+    latchGain.connect(masterGain);
+    latchOsc.onended = () => {
+      safeDisconnect(latchOsc);
+      safeDisconnect(latchGain);
+    };
+    latchOsc.start(clackStart);
+    latchOsc.stop(clackStart + 0.08);
+  }
+
+  function playSpikeHit(): void {
+    if (!ctx || !masterGain || !noiseBurstBuffer || muted || ctx.state !== 'running') {
+      return;
+    }
+    const now = ctx.currentTime;
+    const thudOsc = ctx.createOscillator();
+    const thudGain = ctx.createGain();
+    thudOsc.type = 'sine';
+    thudOsc.frequency.setValueAtTime(140, now);
+    thudOsc.frequency.exponentialRampToValueAtTime(42, now + 0.14);
+    thudGain.gain.setValueAtTime(0.0001, now);
+    thudGain.gain.linearRampToValueAtTime(0.24, now + 0.008);
+    thudGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+    thudOsc.connect(thudGain);
+    thudGain.connect(masterGain);
+    thudOsc.onended = () => {
+      safeDisconnect(thudOsc);
+      safeDisconnect(thudGain);
+    };
+    thudOsc.start(now);
+    thudOsc.stop(now + 0.18);
+
+    const crunch = ctx.createBufferSource();
+    crunch.buffer = noiseBurstBuffer;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 1480;
+    bp.Q.value = 1.4;
+    const cGain = ctx.createGain();
+    cGain.gain.setValueAtTime(0.0001, now);
+    cGain.gain.linearRampToValueAtTime(0.19, now + 0.006);
+    cGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+    crunch.connect(bp);
+    bp.connect(cGain);
+    cGain.connect(masterGain);
+    crunch.onended = () => {
+      safeDisconnect(crunch);
+      safeDisconnect(bp);
+      safeDisconnect(cGain);
+    };
+    crunch.start(now);
+    crunch.stop(now + 0.14);
+  }
+
   return {
     unlock,
     isMuted(): boolean {
@@ -1709,6 +2067,12 @@ export function createFrontierAudio(): FrontierAudio {
     playFlashlightClick,
     playStalkerSound,
     playBuildCamp,
+    playWoodChop,
+    playRockMine,
+    playBuildPiece,
+    playDismantle,
+    playDoorToggle,
+    playSpikeHit,
     update(elapsed: number, dt: number, spatial?: SpatialAudioState): void {
       if (!ctx || ctx.state !== 'running' || muted) {
         return;
