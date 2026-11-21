@@ -118,4 +118,49 @@ describe('terrain math and collision', () => {
     const alongNewShortAxis = { x: 2.2, z: 0 };
     expect(resolveHorizontalCollision(alongNewShortAxis, 0.4, rotated)).toBe(false);
   });
+
+  it('respects vertical-band minY/maxY bounds on OBB, box, and circle obstacles', () => {
+    const secondStoryWall = createObbObstacle(0, 0, 3.0, 0.3, 0, 2.8, 5.6);
+    const secondStoryBox: Obstacle = {
+      kind: 'box',
+      minX: 8,
+      maxX: 11,
+      minZ: -0.5,
+      maxZ: 0.5,
+      minY: 2.8,
+      maxY: 5.6,
+    };
+    const secondStoryPillar: Obstacle = {
+      kind: 'circle',
+      x: -8,
+      z: 0,
+      radius: 0.6,
+      minY: 2.8,
+      maxY: 5.6,
+    };
+    const obstacles: Obstacle[] = [secondStoryWall, secondStoryBox, secondStoryPillar];
+
+    // Ground floor actor (y = 0 -> span [0.16, 1.72]) passes cleanly underneath all 3
+    expect(resolveHorizontalCollision({ x: 0, z: 0.1 }, 0.44, obstacles, 0)).toBe(false);
+    expect(resolveHorizontalCollision({ x: 9.5, z: 0 }, 0.44, obstacles, 0)).toBe(false);
+    expect(resolveHorizontalCollision({ x: -8, z: 0.2 }, 0.44, obstacles, 0)).toBe(false);
+
+    // 2nd-story actor (y = 2.8 -> span [2.96, 4.52]) collides with all 3
+    const obbHitPos = { x: 0, z: 0.1 };
+    expect(resolveHorizontalCollision(obbHitPos, 0.44, obstacles, 2.8)).toBe(true);
+    expect(Math.abs(obbHitPos.z)).toBeGreaterThanOrEqual(0.58);
+
+    expect(resolveHorizontalCollision({ x: 9.5, z: 0 }, 0.44, obstacles, 2.8)).toBe(true);
+    expect(resolveHorizontalCollision({ x: -8, z: 0.2 }, 0.44, obstacles, 2.8)).toBe(true);
+
+    // Roof actor above 2nd-story wall (y = 5.6 -> span [5.76, 7.32]) passes cleanly overhead
+    expect(resolveHorizontalCollision({ x: 0, z: 0.1 }, 0.44, obstacles, 5.6)).toBe(false);
+    expect(resolveHorizontalCollision({ x: 9.5, z: 0 }, 0.44, obstacles, 5.6)).toBe(false);
+    expect(resolveHorizontalCollision({ x: -8, z: 0.2 }, 0.44, obstacles, 5.6)).toBe(false);
+
+    // Legacy 3-argument call without actorY still collides for backward compatibility
+    expect(resolveHorizontalCollision({ x: 0, z: 0.1 }, 0.44, obstacles)).toBe(true);
+    expect(resolveHorizontalCollision({ x: 9.5, z: 0 }, 0.44, obstacles)).toBe(true);
+    expect(resolveHorizontalCollision({ x: -8, z: 0.2 }, 0.44, obstacles)).toBe(true);
+  });
 });

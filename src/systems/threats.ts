@@ -1,14 +1,20 @@
 import * as THREE from 'three';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
-import { collectMaterialTextures, loadOptionalGlbAsset } from '../world/assetLoader';
+import {
+  collectMaterialTextures,
+  loadOptionalGlbAsset,
+  loadOptionalGlbSlot,
+} from '../world/assetLoader';
 import {
   clamp,
   getTerrainHeight,
   resolveHorizontalCollision,
+  WORLD_BOUNDS,
   type Obstacle,
   type Vec2Like,
 } from '../world/terrain';
 import { getWorldTextureAtlas } from '../world/textures';
+import type { StructureDamageResult, StructureTargetProbe } from './building';
 import { hasLineOfSight, isPointInVisionCone } from './stealth';
 import type { LootBundle } from './survival';
 
@@ -22,6 +28,13 @@ export type RaiderState =
 
 export type GlobalAlertLevel = 'unaware' | 'suspicious' | 'alert';
 
+export interface SiegeStatus {
+  active: boolean;
+  wave: number;
+  remainingHostiles: number;
+  cooldownRemaining: number;
+}
+
 export interface ThreatsUpdateInput {
   readonly playerX: number;
   readonly playerY: number;
@@ -34,7 +47,17 @@ export interface ThreatsUpdateInput {
   readonly flashlightOn?: boolean;
   readonly getFlashlightExposure?: (x: number, y: number, z: number) => number;
   readonly getFireRepel?: (x: number, z: number, out: Vec2Like) => boolean;
-  readonly checkSpikeHit?: (x: number, z: number, radius: number) => boolean;
+  readonly checkSpikeHit?: (x: number, z: number, radius: number, actorY?: number) => boolean;
+  readonly baseAnchor?: Vec2Like | null;
+  readonly findNearestStructure?: (
+    x: number,
+    z: number,
+    maxRange: number,
+    out: StructureTargetProbe,
+    actorY?: number,
+  ) => boolean;
+  readonly damageStructure?: (id: string, amount: number) => StructureDamageResult;
+  readonly checkArrowStructureHit?: (x: number, y: number, z: number) => boolean;
 }
 
 export interface PlayerMeleeHitResult {
@@ -49,7 +72,7 @@ export interface PlayerMeleeHitResult {
 
 export interface ThreatSystemOptions {
   readonly obstacles: readonly Obstacle[];
-  readonly getSupportHeight?: (x: number, z: number) => number;
+  readonly getSupportHeight?: (x: number, z: number, currentY?: number) => number;
   readonly onPlayerHit?: (damage: number, sourceX: number, sourceZ: number) => void;
   readonly onBottleShatter?: (x: number, z: number) => void;
   readonly onAlertSting?: (level: 'suspicious' | 'alert') => void;
@@ -59,6 +82,25 @@ export interface ThreatSystemOptions {
     z: number,
     downed: boolean,
     isMonster: boolean,
+    loot?: LootBundle,
+  ) => void;
+  readonly onStructureBashed?: (
+    destroyed: boolean,
+    label: string | undefined,
+    x: number,
+    z: number,
+  ) => void;
+  readonly onSiegeEvent?: (
+    kind: 'started' | 'repelled',
+    wave: number,
+    hostiles: number,
+    rewardLoot?: LootBundle,
+  ) => void;
+  readonly onArrowHit?: (
+    hitEnemy: boolean,
+    downed: boolean,
+    isMonster: boolean,
+    headshot: boolean,
     loot?: LootBundle,
   ) => void;
 }
@@ -73,6 +115,8 @@ export interface ThreatSystem {
     forwardX: number,
     forwardZ: number,
     playerCrouching: boolean,
+    damageOverride?: number,
+    playerY?: number,
   ): PlayerMeleeHitResult;
   throwBottle(
     originX: number,
@@ -82,6 +126,16 @@ export interface ThreatSystem {
     dirY: number,
     dirZ: number,
   ): boolean;
+  shootArrow(
+    originX: number,
+    originY: number,
+    originZ: number,
+    dirX: number,
+    dirY: number,
+    dirZ: number,
+  ): boolean;
+  triggerSiegeWave(anchorX: number, anchorZ: number): boolean;
+  getSiegeStatus(out: SiegeStatus): void;
   getAlertState(): GlobalAlertLevel;
   getAliveCount(): number;
   reset(): void;
@@ -173,6 +227,14 @@ interface RaiderActor {
   downProgress: number;
   stridePhase: number;
   blockedTimer: number;
+  isSieging: boolean;
+  siegeTargetX: number;
+  siegeTargetZ: number;
+  structBashCooldown: number;
+  bashingStructId: string | null;
+  bashingStructX: number;
+  bashingStructZ: number;
+  bashingStructHitDelivered: boolean;
 }
 
 interface PooledBottle {
@@ -185,6 +247,20 @@ interface PooledBottle {
   vy: number;
   vz: number;
   age: number;
+}
+
+interface PooledArrow {
+  readonly group: THREE.Group;
+  active: boolean;
+  stuck: boolean;
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  age: number;
+  stuckTimer: number;
 }
 
 interface ShatterBurst {
@@ -206,7 +282,7 @@ const STALKER_ATTACK_RANGE = 2.05;
 const RAIDER_ATTACK_CADENCE = 1.35;
 const RAIDER_ATTACK_HIT_DELAY = 0.34;
 const PLAYER_MELEE_RANGE = 2.3;
-const PLAYER_MELEE_DAMAGE = 35;
+const PLAYER_MELEE_DAMAGE = 34;
 const STALKER_STEALTH_AMBUSH_DAMAGE = 75;
 const STALKER_FLASHLIGHT_RECOIL_COOLDOWN = 9.0;
 
@@ -216,6 +292,25 @@ const BOTTLE_GRAVITY = 16.0;
 const BOTTLE_NOISE_RADIUS = 18.0;
 const SHATTER_PARTICLE_COUNT = 14;
 const SHATTER_DURATION = 0.65;
+
+const ARROW_POOL_SIZE = 12;
+const ARROW_SPEED = 29.0;
+const ARROW_GRAVITY = 6.2;
+const ARROW_STUCK_LIFETIME = 6.0;
+const ARROW_MAX_FLIGHT_AGE = 3.5;
+const ARROW_HIT_RADIUS = 0.56;
+const ARROW_BODY_DAMAGE = 55;
+const ARROW_CRIT_DAMAGE = 95;
+
+const SIEGE_BUILDUP_SECONDS = 16.0;
+const SIEGE_COOLDOWN_SECONDS = 115.0;
+const STRUCT_BASH_RANGE = 2.45;
+const RAIDER_STRUCT_BASH_COOLDOWN = 1.55;
+const STALKER_STRUCT_BASH_COOLDOWN = 1.25;
+const RAIDER_STRUCT_BASH_DAMAGE = 20;
+const STALKER_STRUCT_BASH_DAMAGE = 28;
+
+const ARROW_LOCAL_FORWARD = new THREE.Vector3(0, 0, -1);
 
 const RAIDER_SPECS: readonly RaiderSpec[] = [
   {
@@ -286,6 +381,26 @@ const RAIDER_SPECS: readonly RaiderSpec[] = [
     ],
     dropLoot: { rations: 2, medkits: 2, scrap: 5 },
   },
+  {
+    // Deep valley raider skirmisher (rallies in Wave 2+ base sieges)
+    id: 'ridge_skirmisher',
+    isMonster: false,
+    maxHealth: 100,
+    attackDamage: 22,
+    patrolSpeed: 1.7,
+    investigateSpeed: 2.35,
+    chaseSpeed: 4.75,
+    spawnX: -14.5,
+    spawnZ: -52.0,
+    spawnYaw: 0.85,
+    waypoints: [
+      [-14.5, -52.0],
+      [-10.2, -62.0],
+      [-19.5, -60.5],
+      [-18.0, -48.5],
+    ],
+    dropLoot: { rations: 1, scrap: 3, arrows: 3 },
+  },
 ];
 
 function lerpAngle(current: number, target: number, alpha: number): number {
@@ -337,7 +452,14 @@ function findUniqueClip(
   return null;
 }
 
-function createStatusTexture(symbol: '?' | '!', strokeHex: string, glowRgba: string): THREE.CanvasTexture {
+function createStatusTexture(
+  symbol: '?' | '!',
+  strokeHex: string,
+  glowRgba: string,
+): THREE.CanvasTexture | null {
+  if (typeof document === 'undefined') {
+    return null;
+  }
   const size = 128;
   const canvas = document.createElement('canvas');
   canvas.width = size;
@@ -605,9 +727,9 @@ function buildProceduralStalkerRig(
 }
 
 /**
- * Manages patrolling hostile scavenger raiders and The Hollow Stalker apex predator
- * (vision cones, LOS occlusion, acoustic hearing, flashlight recoil, melee & stealth combat)
- * plus a zero-allocation throwable distraction bottle pool.
+ * Manages patrolling hostile scavenger raiders, The Hollow Stalker apex predator,
+ * Night & Storm Base Sieges with structure-bashing AI, throwable distraction bottles,
+ * and a 12-slot pooled ballistic hunting arrow system.
  */
 export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
   const {
@@ -618,17 +740,20 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
     onAlertSting,
     onStalkerSound,
     onSpikeHit,
+    onStructureBashed,
+    onSiegeEvent,
+    onArrowHit,
   } = options;
-  const sampleSupportHeight = (x: number, z: number): number =>
-    getSupportHeight ? getSupportHeight(x, z) : getTerrainHeight(x, z);
+  const sampleSupportHeight = (x: number, z: number, currentY?: number): number =>
+    getSupportHeight ? getSupportHeight(x, z, currentY) : getTerrainHeight(x, z);
 
   const root = new THREE.Group();
-  const atlas = getWorldTextureAtlas();
+  const atlas = typeof document !== 'undefined' ? getWorldTextureAtlas() : null;
 
-  // Shared materials for procedural fallback raiders & bottle pool (never disposed per-actor)
+  // Shared materials for procedural fallback raiders, bottles & arrows (never disposed per-actor)
   const coatMat = new THREE.MeshStandardMaterial({
-    map: atlas.fabricOlive.map,
-    normalMap: atlas.fabricOlive.normalMap,
+    map: atlas?.fabricOlive.map ?? null,
+    normalMap: atlas?.fabricOlive.normalMap ?? null,
     color: 0x3b3d38,
     roughness: 0.94,
     metalness: 0.05,
@@ -654,8 +779,8 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
     metalness: 0.02,
   });
   const weaponMat = new THREE.MeshStandardMaterial({
-    map: atlas.rustDark.map,
-    normalMap: atlas.rustDark.normalMap,
+    map: atlas?.rustDark.map ?? null,
+    normalMap: atlas?.rustDark.normalMap ?? null,
     color: 0x6b4f41,
     roughness: 0.72,
     metalness: 0.55,
@@ -668,8 +793,8 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
     opacity: 0.86,
   });
   const stalkerBarkMat = new THREE.MeshStandardMaterial({
-    map: atlas.pineBark.map,
-    normalMap: atlas.pineBark.normalMap,
+    map: atlas?.pineBark.map ?? null,
+    normalMap: atlas?.pineBark.normalMap ?? null,
     color: 0x3b352e,
     roughness: 0.94,
     metalness: 0.04,
@@ -681,6 +806,21 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
   });
   const stalkerEyeMat = new THREE.MeshBasicMaterial({
     color: 0xffa634,
+  });
+  const arrowShaftMat = new THREE.MeshStandardMaterial({
+    color: 0x2a2927,
+    roughness: 0.62,
+    metalness: 0.25,
+  });
+  const arrowTipMat = new THREE.MeshStandardMaterial({
+    color: 0x8e969c,
+    roughness: 0.35,
+    metalness: 0.78,
+  });
+  const arrowFletchMat = new THREE.MeshStandardMaterial({
+    color: 0x993529,
+    roughness: 0.78,
+    metalness: 0.04,
   });
 
   const sharedProceduralMaterials = new Set<THREE.Material>([
@@ -694,6 +834,9 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
     stalkerBarkMat,
     stalkerAntlerMat,
     stalkerEyeMat,
+    arrowShaftMat,
+    arrowTipMat,
+    arrowFletchMat,
   ]);
 
   const questionTex = createStatusTexture('?', '#e8b354', 'rgba(232, 179, 84, 0.36)');
@@ -701,6 +844,12 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
 
   let disposed = false;
   let globalAlert: GlobalAlertLevel = 'unaware';
+
+  // Siege director state
+  let siegeActive = false;
+  let siegeWave = 0;
+  let siegeCooldown = 0;
+  let siegeBuildupTimer = 0;
 
   const actors: RaiderActor[] = [];
 
@@ -793,6 +942,14 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       downProgress: 0,
       stridePhase: i * 1.9,
       blockedTimer: 0,
+      isSieging: false,
+      siegeTargetX: spec.spawnX,
+      siegeTargetZ: spec.spawnZ,
+      structBashCooldown: 0,
+      bashingStructId: null,
+      bashingStructX: 0,
+      bashingStructZ: 0,
+      bashingStructHitDelivered: false,
     });
   }
 
@@ -941,7 +1098,6 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
         let initIdleWeight = 1;
         let initDeathWeight = 0;
         if (actor.state === 'downed' && deathAction) {
-          // Clear procedural tip-over transform and pose directly at the final frame of MoCap death
           actor.visualPivot.rotation.set(0, 0, 0);
           actor.visualPivot.position.set(0, 0, 0);
           initIdleWeight = 0;
@@ -982,8 +1138,10 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
     });
   };
 
-  loadGlbForMatchingActors('raider', false);
-  loadGlbForMatchingActors('hollow_stalker', true);
+  if (typeof window !== 'undefined') {
+    loadGlbForMatchingActors('raider', false);
+    loadGlbForMatchingActors('hollow_stalker', true);
+  }
 
   // Pre-allocated throwable bottle & glass-shatter particle burst pools (ZERO per-frame allocations!)
   const bottleGeo = new THREE.CylinderGeometry(0.036, 0.044, 0.25, 8);
@@ -1035,13 +1193,278 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
     });
   }
 
+  // Pre-allocated 12-slot ballistic hunting arrow pool (ZERO per-frame heap allocations!)
+  const fallbackArrowShaftGeo = new THREE.CylinderGeometry(0.006, 0.006, 0.72, 6);
+  fallbackArrowShaftGeo.rotateX(Math.PI * 0.5);
+  const fallbackArrowTipGeo = new THREE.ConeGeometry(0.018, 0.075, 4);
+  fallbackArrowTipGeo.rotateX(-Math.PI * 0.5);
+  const fallbackArrowFletchGeo = new THREE.BoxGeometry(0.042, 0.004, 0.09);
+
+  const arrows: PooledArrow[] = [];
+  for (let i = 0; i < ARROW_POOL_SIZE; i += 1) {
+    const group = new THREE.Group();
+    group.visible = false;
+
+    const shaft = new THREE.Mesh(fallbackArrowShaftGeo, arrowShaftMat);
+    shaft.castShadow = true;
+    group.add(shaft);
+
+    const tip = new THREE.Mesh(fallbackArrowTipGeo, arrowTipMat);
+    tip.position.set(0, 0, -0.37);
+    tip.castShadow = true;
+    group.add(tip);
+
+    const fletchA = new THREE.Mesh(fallbackArrowFletchGeo, arrowFletchMat);
+    fletchA.position.set(0, 0, 0.3);
+    group.add(fletchA);
+
+    const fletchB = new THREE.Mesh(fallbackArrowFletchGeo, arrowFletchMat);
+    fletchB.position.set(0, 0, 0.3);
+    fletchB.rotation.z = Math.PI * 0.5;
+    group.add(fletchB);
+
+    root.add(group);
+    arrows.push({
+      group,
+      active: false,
+      stuck: false,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      age: 0,
+      stuckTimer: 0,
+    });
+  }
+
+  if (typeof window !== 'undefined') {
+    void loadOptionalGlbSlot('arrow').then((loadedArrow) => {
+      if (!loadedArrow) {
+        return;
+      }
+      if (disposed) {
+        disposeObjectTree(loadedArrow);
+        return;
+      }
+      for (let i = arrows.length - 1; i >= 0; i -= 1) {
+        const slot = arrows[i];
+        if (!slot) {
+          continue;
+        }
+        slot.group.clear();
+        const instance = i === 0 ? loadedArrow : loadedArrow.clone(true);
+        instance.traverse((node: THREE.Object3D) => {
+          if (node instanceof THREE.Mesh) {
+            node.castShadow = true;
+            node.receiveShadow = true;
+          }
+        });
+        slot.group.add(instance);
+      }
+      fallbackArrowShaftGeo.dispose();
+      fallbackArrowTipGeo.dispose();
+      fallbackArrowFletchGeo.dispose();
+    });
+  }
+
   let nextBottleSlot = 0;
   let nextBurstSlot = 0;
+  let nextArrowSlot = 0;
 
   // Pre-allocated scratch structs (ZERO per-frame allocations!)
   const scratchMovePos: Vec2Like = { x: 0, z: 0 };
   const scratchBottlePos: Vec2Like = { x: 0, z: 0 };
   const scratchFirePos: Vec2Like = { x: 0, z: 0 };
+  const scratchStructProbe: StructureTargetProbe = {
+    id: '',
+    kind: 'wall',
+    x: 0,
+    y: 0,
+    z: 0,
+    radius: 0,
+  };
+  const scratchArrowDir = new THREE.Vector3(0, 0, -1);
+  const scratchArrowQuat = new THREE.Quaternion();
+
+  function orientArrowAlongVelocity(arrow: PooledArrow): void {
+    const len = Math.hypot(arrow.vx, arrow.vy, arrow.vz);
+    if (len < 1e-5) {
+      return;
+    }
+    scratchArrowDir.set(arrow.vx / len, arrow.vy / len, arrow.vz / len);
+    scratchArrowQuat.setFromUnitVectors(ARROW_LOCAL_FORWARD, scratchArrowDir);
+    arrow.group.quaternion.copy(scratchArrowQuat);
+  }
+
+  function checkSiegeRepelled(): void {
+    if (!siegeActive) {
+      return;
+    }
+    let remaining = 0;
+    for (let i = 0; i < actors.length; i += 1) {
+      const a = actors[i];
+      if (a && a.isSieging && a.state !== 'downed') {
+        remaining += 1;
+      }
+    }
+    if (remaining === 0) {
+      siegeActive = false;
+      siegeCooldown = SIEGE_COOLDOWN_SECONDS;
+      siegeBuildupTimer = 0;
+      for (let i = 0; i < actors.length; i += 1) {
+        const a = actors[i];
+        if (a) {
+          a.isSieging = false;
+        }
+      }
+      if (onSiegeEvent) {
+        onSiegeEvent('repelled', siegeWave, 0, {
+          scrap: 2 + siegeWave,
+          wood: 3,
+          arrows: 4,
+        });
+      }
+    }
+  }
+
+  function downActor(actor: RaiderActor): void {
+    actor.state = 'downed';
+    actor.awareness = 0;
+    actor.speed = 0;
+    actor.attackSwingTimer = 0;
+    actor.bashingStructId = null;
+    actor.statusSprite.visible = false;
+    if (actor.eyeEmberGroup) {
+      actor.eyeEmberGroup.visible = false;
+    }
+    if (actor.glbRig?.deathAction) {
+      actor.glbRig.deathAction.reset();
+      actor.glbRig.deathAction.setLoop(THREE.LoopOnce, 1);
+      actor.glbRig.deathAction.clampWhenFinished = true;
+      actor.glbRig.deathAction.timeScale = 1.15;
+      actor.glbRig.deathAction.play();
+    }
+    checkSiegeRepelled();
+  }
+
+  function reviveActorForSiege(
+    actor: RaiderActor,
+    spawnX: number,
+    spawnZ: number,
+    anchorX: number,
+    anchorZ: number,
+    relocate: boolean,
+  ): void {
+    if (relocate) {
+      scratchMovePos.x = clamp(spawnX, WORLD_BOUNDS.minX + 3, WORLD_BOUNDS.maxX - 3);
+      scratchMovePos.z = clamp(spawnZ, WORLD_BOUNDS.minZ + 3, WORLD_BOUNDS.maxZ - 3);
+      resolveHorizontalCollision(scratchMovePos, RAIDER_RADIUS + 0.25, obstacles);
+      actor.x = scratchMovePos.x;
+      actor.z = scratchMovePos.z;
+      actor.y = sampleSupportHeight(actor.x, actor.z);
+    }
+
+    actor.hp = actor.spec.maxHealth;
+    actor.state = 'chase';
+    actor.awareness = 1;
+    actor.loseSightTimer = 18;
+    actor.downProgress = 0;
+    actor.staggerTimer = 0;
+    actor.staggerVelX = 0;
+    actor.staggerVelZ = 0;
+    actor.attackSwingTimer = 0;
+    actor.attackHitDelivered = true;
+    actor.fireFleeTimer = 0;
+    actor.blockedTimer = 0;
+    actor.bashingStructId = null;
+    actor.isSieging = true;
+    actor.siegeTargetX = anchorX;
+    actor.siegeTargetZ = anchorZ;
+    actor.investigateX = anchorX;
+    actor.investigateZ = anchorZ;
+    actor.yaw = Math.atan2(-(anchorX - actor.x), -(anchorZ - actor.z));
+
+    actor.visualPivot.rotation.set(0, 0, 0);
+    actor.visualPivot.position.set(0, 0, 0);
+    actor.root.position.set(actor.x, actor.y, actor.z);
+    actor.root.rotation.y = actor.yaw;
+    if (actor.eyeEmberGroup) {
+      actor.eyeEmberGroup.visible = true;
+    }
+
+    if (actor.glbRig) {
+      actor.glbRig.wDeath = 0;
+      actor.glbRig.wHit = 0;
+      actor.glbRig.wAttack = 0;
+      if (actor.glbRig.deathAction) {
+        actor.glbRig.deathAction.stop();
+        actor.glbRig.deathAction.setEffectiveWeight(0);
+      }
+      if (actor.glbRig.hitAction) {
+        actor.glbRig.hitAction.stop();
+        actor.glbRig.hitAction.setEffectiveWeight(0);
+      }
+      if (actor.glbRig.attackAction) {
+        actor.glbRig.attackAction.stop();
+        actor.glbRig.attackAction.setEffectiveWeight(0);
+      }
+    }
+  }
+
+  function triggerSiegeWave(anchorX: number, anchorZ: number): boolean {
+    if (siegeActive) {
+      return false;
+    }
+    siegeWave += 1;
+    siegeActive = true;
+    siegeBuildupTimer = 0;
+
+    // Wave 1 rallies 3 hostiles (2 Raiders + Hollow Stalker); Wave 2+ rallies up to 4
+    const targetCount = Math.min(actors.length, siegeWave === 1 ? 3 : 4);
+    let rallied = 0;
+
+    for (let i = 0; i < targetCount; i += 1) {
+      const actor = actors[i];
+      if (!actor) {
+        continue;
+      }
+      const distFromAnchor = Math.hypot(actor.x - anchorX, actor.z - anchorZ);
+      const shouldRelocate =
+        actor.state === 'downed' || distFromAnchor > 34 || distFromAnchor < 14;
+      const angle = siegeWave * 1.15 + (i / targetCount) * Math.PI * 2 + 0.35;
+      const dist = 24 + (i % 3) * 3;
+      const sx = anchorX + Math.cos(angle) * dist;
+      const sz = anchorZ + Math.sin(angle) * dist;
+      reviveActorForSiege(actor, sx, sz, anchorX, anchorZ, shouldRelocate);
+      rallied += 1;
+    }
+
+    if (globalAlert !== 'alert') {
+      globalAlert = 'alert';
+    }
+    if (onSiegeEvent) {
+      onSiegeEvent('started', siegeWave, rallied);
+    }
+    return rallied > 0;
+  }
+
+  function getSiegeStatus(out: SiegeStatus): void {
+    let remaining = 0;
+    if (siegeActive) {
+      for (let i = 0; i < actors.length; i += 1) {
+        const a = actors[i];
+        if (a && a.isSieging && a.state !== 'downed') {
+          remaining += 1;
+        }
+      }
+    }
+    out.active = siegeActive;
+    out.wave = siegeWave;
+    out.remainingHostiles = remaining;
+    out.cooldownRemaining = siegeCooldown;
+  }
 
   function spawnShatterBurst(x: number, y: number, z: number): void {
     const burst = shatterBursts[nextBurstSlot];
@@ -1091,9 +1514,8 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
         continue;
       }
 
-      // Active combatants already seeing the player stay locked; otherwise draw toward noise
       if (actor.state === 'chase' || actor.state === 'attack') {
-        if (actor.loseSightTimer < 4.5) {
+        if (actor.loseSightTimer < 4.5 && !actor.isSieging) {
           actor.investigateX = x;
           actor.investigateZ = z;
         }
@@ -1153,12 +1575,69 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
     return true;
   }
 
+  function shootArrow(
+    originX: number,
+    originY: number,
+    originZ: number,
+    dirX: number,
+    dirY: number,
+    dirZ: number,
+  ): boolean {
+    let slot: PooledArrow | null = null;
+    for (let i = 0; i < arrows.length; i += 1) {
+      const candidate = arrows[i];
+      if (candidate && !candidate.active && !candidate.stuck) {
+        slot = candidate;
+        break;
+      }
+    }
+    if (!slot) {
+      for (let i = 0; i < arrows.length; i += 1) {
+        const candidate = arrows[i];
+        if (candidate && candidate.stuck) {
+          slot = candidate;
+          break;
+        }
+      }
+    }
+    if (!slot) {
+      slot = arrows[nextArrowSlot] ?? null;
+      nextArrowSlot = (nextArrowSlot + 1) % arrows.length;
+    }
+    if (!slot) {
+      return false;
+    }
+
+    const len = Math.hypot(dirX, dirY, dirZ);
+    const invLen = len > 1e-5 ? 1 / len : 1;
+    const nx = dirX * invLen;
+    const ny = dirY * invLen;
+    const nz = dirZ * invLen;
+
+    slot.active = true;
+    slot.stuck = false;
+    slot.age = 0;
+    slot.stuckTimer = 0;
+    slot.x = originX;
+    slot.y = originY;
+    slot.z = originZ;
+    slot.vx = nx * ARROW_SPEED;
+    slot.vy = ny * ARROW_SPEED;
+    slot.vz = nz * ARROW_SPEED;
+    slot.group.position.set(originX, originY, originZ);
+    orientArrowAlongVelocity(slot);
+    slot.group.visible = true;
+    return true;
+  }
+
   function tryPlayerMeleeHit(
     playerX: number,
     playerZ: number,
     forwardX: number,
     forwardZ: number,
     playerCrouching: boolean,
+    damageOverride?: number,
+    playerY?: number,
   ): PlayerMeleeHitResult {
     let bestActor: RaiderActor | null = null;
     let bestDistSq = PLAYER_MELEE_RANGE * PLAYER_MELEE_RANGE;
@@ -1166,6 +1645,9 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
     for (let i = 0; i < actors.length; i += 1) {
       const actor = actors[i];
       if (!actor || actor.state === 'downed') {
+        continue;
+      }
+      if (playerY !== undefined && Math.abs(actor.y - playerY) > 1.75) {
         continue;
       }
       const dx = actor.x - playerX;
@@ -1210,28 +1692,19 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
     const isBehindRaider = dotFromRaiderFront < 0.15;
     const stealthTakedown = raiderUnaware && (playerCrouching || isBehindRaider);
 
+    const normalDamage =
+      typeof damageOverride === 'number' && Number.isFinite(damageOverride) && damageOverride > 0
+        ? damageOverride
+        : PLAYER_MELEE_DAMAGE;
     const damage = stealthTakedown
       ? bestActor.spec.isMonster
         ? STALKER_STEALTH_AMBUSH_DAMAGE
         : bestActor.spec.maxHealth
-      : PLAYER_MELEE_DAMAGE;
+      : normalDamage;
     bestActor.hp = Math.max(0, bestActor.hp - damage);
 
     if (bestActor.hp <= 0) {
-      bestActor.state = 'downed';
-      bestActor.awareness = 0;
-      bestActor.speed = 0;
-      bestActor.statusSprite.visible = false;
-      if (bestActor.eyeEmberGroup) {
-        bestActor.eyeEmberGroup.visible = false;
-      }
-      if (bestActor.glbRig?.deathAction) {
-        bestActor.glbRig.deathAction.reset();
-        bestActor.glbRig.deathAction.setLoop(THREE.LoopOnce, 1);
-        bestActor.glbRig.deathAction.clampWhenFinished = true;
-        bestActor.glbRig.deathAction.timeScale = 1.15;
-        bestActor.glbRig.deathAction.play();
-      }
+      downActor(bestActor);
       return {
         hit: true,
         stealthTakedown,
@@ -1249,6 +1722,7 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
     bestActor.staggerTimer = 0.42;
     bestActor.attackSwingTimer = 0;
     bestActor.attackHitDelivered = true;
+    bestActor.bashingStructId = null;
     bestActor.staggerVelX = knockX * 2.4;
     bestActor.staggerVelZ = knockZ * 2.4;
     if (bestActor.glbRig) {
@@ -1485,8 +1959,26 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       getFlashlightExposure,
       getFireRepel,
       checkSpikeHit,
+      baseAnchor,
+      findNearestStructure,
+      damageStructure,
+      checkArrowStructureHit,
     } = input;
     const nocturnalHunt = nightFactor > 0.35 || rainIntensity > 0.4;
+
+    // 0. Night & Storm Base Siege Director auto-trigger
+    if (!siegeActive) {
+      if (siegeCooldown > 0) {
+        siegeCooldown = Math.max(0, siegeCooldown - dt);
+      } else if (baseAnchor && !playerDead && (nightFactor >= 0.52 || rainIntensity >= 0.55)) {
+        siegeBuildupTimer += dt;
+        if (siegeBuildupTimer >= SIEGE_BUILDUP_SECONDS) {
+          triggerSiegeWave(baseAnchor.x, baseAnchor.z);
+        }
+      } else if (siegeBuildupTimer > 0) {
+        siegeBuildupTimer = Math.max(0, siegeBuildupTimer - dt * 0.5);
+      }
+    }
 
     // 1. Update pooled throwable distraction bottles & shatter bursts
     for (let i = 0; i < bottles.length; i += 1) {
@@ -1503,15 +1995,15 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       b.mesh.rotation.x += dt * 9.5;
       b.mesh.rotation.z += dt * 6.2;
 
-      const groundY = sampleSupportHeight(b.x, b.z);
+      const groundY = sampleSupportHeight(b.x, b.z, b.y);
       scratchBottlePos.x = b.x;
       scratchBottlePos.z = b.z;
-      const hitObstacle = resolveHorizontalCollision(scratchBottlePos, 0.14, obstacles);
+      const hitObstacle = resolveHorizontalCollision(scratchBottlePos, 0.14, obstacles, b.y, 0.28);
 
       if (b.y <= groundY + 0.06 || hitObstacle || b.age > 3.5) {
         const hitX = hitObstacle ? scratchBottlePos.x : b.x;
         const hitZ = hitObstacle ? scratchBottlePos.z : b.z;
-        const impactY = Math.max(sampleSupportHeight(hitX, hitZ), b.y);
+        const impactY = Math.max(sampleSupportHeight(hitX, hitZ, b.y), b.y);
         b.active = false;
         b.mesh.visible = false;
         spawnShatterBurst(hitX, impactY, hitZ);
@@ -1550,12 +2042,188 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       burst.material.opacity = (1 - burst.age / SHATTER_DURATION) * 0.9;
     }
 
+    // 1b. Update pooled ballistic hunting arrows (substepped swept hits, ZERO allocations!)
+    for (let i = 0; i < arrows.length; i += 1) {
+      const arrow = arrows[i];
+      if (!arrow) {
+        continue;
+      }
+      if (arrow.stuck) {
+        arrow.stuckTimer -= dt;
+        if (arrow.stuckTimer <= 0) {
+          arrow.stuck = false;
+          arrow.group.visible = false;
+        }
+        continue;
+      }
+      if (!arrow.active) {
+        continue;
+      }
+
+      arrow.age += dt;
+      if (arrow.age > ARROW_MAX_FLIGHT_AGE) {
+        arrow.active = false;
+        arrow.group.visible = false;
+        continue;
+      }
+
+      const prevX = arrow.x;
+      const prevY = arrow.y;
+      const prevZ = arrow.z;
+      arrow.vy -= ARROW_GRAVITY * dt;
+      const nextX = prevX + arrow.vx * dt;
+      const nextY = prevY + arrow.vy * dt;
+      const nextZ = prevZ + arrow.vz * dt;
+
+      const stepDist = Math.hypot(nextX - prevX, nextY - prevY, nextZ - prevZ);
+      const substeps = Math.max(1, Math.min(8, Math.ceil(stepDist / 0.22)));
+      let terminated = false;
+
+      for (let s = 1; s <= substeps; s += 1) {
+        const u = s / substeps;
+        const ax = prevX + (nextX - prevX) * u;
+        const ay = prevY + (nextY - prevY) * u;
+        const az = prevZ + (nextZ - prevZ) * u;
+
+        // 1. Living Raiders & Hollow Stalker vertical capsule check
+        let hitActor: RaiderActor | null = null;
+        for (let a = 0; a < actors.length; a += 1) {
+          const actor = actors[a];
+          if (!actor || actor.state === 'downed') {
+            continue;
+          }
+          if (ay < actor.y + 0.15 || ay > actor.y + 1.88) {
+            continue;
+          }
+          const dx = ax - actor.x;
+          const dz = az - actor.z;
+          if (dx * dx + dz * dz <= ARROW_HIT_RADIUS * ARROW_HIT_RADIUS) {
+            hitActor = actor;
+            break;
+          }
+        }
+
+        if (hitActor) {
+          const headshot = ay >= hitActor.y + 1.42;
+          const unaware =
+            hitActor.state === 'patrol' ||
+            hitActor.state === 'suspicious' ||
+            hitActor.state === 'investigate';
+          const dmg = headshot || unaware ? ARROW_CRIT_DAMAGE : ARROW_BODY_DAMAGE;
+          hitActor.hp = Math.max(0, hitActor.hp - dmg);
+
+          arrow.active = false;
+          arrow.stuck = false;
+          arrow.group.visible = false;
+          terminated = true;
+
+          if (hitActor.hp <= 0) {
+            downActor(hitActor);
+            if (onArrowHit) {
+              onArrowHit(true, true, hitActor.spec.isMonster, headshot, hitActor.spec.dropLoot);
+            }
+          } else {
+            const vLen = Math.hypot(arrow.vx, arrow.vz) || 1;
+            hitActor.staggerTimer = 0.36;
+            hitActor.attackSwingTimer = 0;
+            hitActor.attackHitDelivered = true;
+            hitActor.bashingStructId = null;
+            hitActor.staggerVelX = (arrow.vx / vLen) * 1.8;
+            hitActor.staggerVelZ = (arrow.vz / vLen) * 1.8;
+            if (hitActor.glbRig) {
+              hitActor.glbRig.wAttack = 0;
+              if (hitActor.glbRig.attackAction) {
+                hitActor.glbRig.attackAction.stop();
+                hitActor.glbRig.attackAction.setEffectiveWeight(0);
+              }
+              if (hitActor.glbRig.hitAction) {
+                hitActor.glbRig.hitAction.reset();
+                hitActor.glbRig.hitAction.setLoop(THREE.LoopOnce, 1);
+                hitActor.glbRig.hitAction.clampWhenFinished = true;
+                hitActor.glbRig.hitAction.timeScale = 1.05;
+                hitActor.glbRig.hitAction.play();
+              }
+            }
+            const wasAlert = hitActor.state === 'chase' || hitActor.state === 'attack';
+            hitActor.awareness = 1;
+            hitActor.investigateX = playerX;
+            hitActor.investigateZ = playerZ;
+            hitActor.loseSightTimer = 7.5;
+            hitActor.state = 'chase';
+            if (!wasAlert && hitActor.spec.isMonster && hitActor.shriekCooldown <= 0) {
+              hitActor.shriekCooldown = 14;
+              if (onStalkerSound) {
+                onStalkerSound('shriek');
+              }
+            }
+            if (onArrowHit) {
+              onArrowHit(true, false, hitActor.spec.isMonster, headshot);
+            }
+          }
+          break;
+        }
+
+        // 2. Built structures (allows arrows cleanly through window_wall embrasures & open doorways!)
+        if (checkArrowStructureHit && checkArrowStructureHit(ax, ay, az)) {
+          arrow.x = ax;
+          arrow.y = ay;
+          arrow.z = az;
+          arrow.active = false;
+          arrow.stuck = true;
+          arrow.stuckTimer = ARROW_STUCK_LIFETIME;
+          arrow.group.position.set(ax, ay, az);
+          orientArrowAlongVelocity(arrow);
+          terminated = true;
+          if (onArrowHit) {
+            onArrowHit(false, false, false, false);
+          }
+          break;
+        }
+
+        // 3. Ground terrain impact
+        const terrainY = getTerrainHeight(ax, az);
+        if (ay <= terrainY) {
+          arrow.x = ax;
+          arrow.y = terrainY;
+          arrow.z = az;
+          arrow.active = false;
+          arrow.stuck = true;
+          arrow.stuckTimer = ARROW_STUCK_LIFETIME;
+          arrow.group.position.set(ax, terrainY, az);
+          orientArrowAlongVelocity(arrow);
+          terminated = true;
+          if (onArrowHit) {
+            onArrowHit(false, false, false, false);
+          }
+          break;
+        }
+      }
+
+      if (!terminated) {
+        if (
+          nextX < WORLD_BOUNDS.minX - 6 ||
+          nextX > WORLD_BOUNDS.maxX + 6 ||
+          nextZ < WORLD_BOUNDS.minZ - 6 ||
+          nextZ > WORLD_BOUNDS.maxZ + 6
+        ) {
+          arrow.active = false;
+          arrow.group.visible = false;
+        } else {
+          arrow.x = nextX;
+          arrow.y = nextY;
+          arrow.z = nextZ;
+          arrow.group.position.set(nextX, nextY, nextZ);
+          orientArrowAlongVelocity(arrow);
+        }
+      }
+    }
+
     // 2. Player movement sound hearing check
     if (!playerDead && playerNoiseRadius > 0.5) {
       emitNoise(playerX, playerZ, playerNoiseRadius);
     }
 
-    // 3. Update each patrolling raider AI
+    // 3. Update each patrolling / sieging raider & Hollow Stalker AI
     let highestAlert: GlobalAlertLevel = 'unaware';
     const prevGlobalAlert = globalAlert;
 
@@ -1576,6 +2244,9 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       if (actor.attackSwingTimer > 0) {
         actor.attackSwingTimer = Math.max(0, actor.attackSwingTimer - dt);
       }
+      if (actor.structBashCooldown > 0) {
+        actor.structBashCooldown = Math.max(0, actor.structBashCooldown - dt);
+      }
       if (actor.recoilCooldown > 0) {
         actor.recoilCooldown = Math.max(0, actor.recoilCooldown - dt);
       }
@@ -1595,14 +2266,15 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       // Stagger knockback recovery
       if (actor.staggerTimer > 0) {
         actor.staggerTimer = Math.max(0, actor.staggerTimer - dt);
+        actor.bashingStructId = null;
         scratchMovePos.x = actor.x + actor.staggerVelX * dt;
         scratchMovePos.z = actor.z + actor.staggerVelZ * dt;
-        resolveHorizontalCollision(scratchMovePos, RAIDER_RADIUS, obstacles);
+        resolveHorizontalCollision(scratchMovePos, RAIDER_RADIUS, obstacles, actor.y);
         actor.x = scratchMovePos.x;
         actor.z = scratchMovePos.z;
         actor.staggerVelX *= Math.max(0, 1 - dt * 6);
         actor.staggerVelZ *= Math.max(0, 1 - dt * 6);
-        actor.y = sampleSupportHeight(actor.x, actor.z);
+        actor.y = sampleSupportHeight(actor.x, actor.z, actor.y);
         actor.root.position.set(actor.x, actor.y, actor.z);
         actor.speed = 0;
         highestAlert = 'alert';
@@ -1618,7 +2290,6 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       const attackRange = actor.spec.isMonster ? STALKER_ATTACK_RANGE : RAIDER_ATTACK_RANGE;
 
       if (actor.spec.isMonster) {
-        // Periodic eerie prowl wood-clicks while hunting within 28 m
         if (distToPlayer < 28 && !playerDead) {
           actor.prowlSoundCooldown -= dt;
           if (actor.prowlSoundCooldown <= 0) {
@@ -1638,11 +2309,15 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
           distToPlayer <= 16.0
         ) {
           const beamExposure = getFlashlightExposure(actor.x, actor.y + 1.55, actor.z);
-          if (beamExposure > 0.52 && hasLineOfSight(playerX, playerZ, actor.x, actor.z, obstacles)) {
+          if (
+            beamExposure > 0.52 &&
+            hasLineOfSight(playerX, playerZ, actor.x, actor.z, obstacles, actor.y + 1.55)
+          ) {
             actor.recoilCooldown = STALKER_FLASHLIGHT_RECOIL_COOLDOWN;
             actor.staggerTimer = 0.85;
             actor.attackSwingTimer = 0;
             actor.attackHitDelivered = true;
+            actor.bashingStructId = null;
             const awayInv = distToPlayer > 1e-4 ? 1 / distToPlayer : 0;
             actor.staggerVelX = -dxToPlayer * awayInv * 1.9;
             actor.staggerVelZ = -dzToPlayer * awayInv * 1.9;
@@ -1688,7 +2363,10 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
           RAIDER_VISION_HALF_FOV,
         );
         const closeExposed = distToPlayer < (actor.spec.isMonster ? 3.2 : 2.4) && playerVisibility > 0.55;
-        if ((inCone || closeExposed) && hasLineOfSight(actor.x, actor.z, playerX, playerZ, obstacles)) {
+        if (
+          (inCone || closeExposed) &&
+          hasLineOfSight(actor.x, actor.z, playerX, playerZ, obstacles, actor.y + 1.55)
+        ) {
           seesPlayer = true;
         }
       }
@@ -1719,6 +2397,15 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
         } else if (actor.awareness >= 0.25 && actor.state === 'patrol') {
           actor.state = 'suspicious';
         }
+      } else if (actor.isSieging && !playerDead) {
+        // Active siege wave hostiles persistently press the base anchor rather than de-aggroing
+        actor.awareness = 1;
+        actor.loseSightTimer = Math.max(actor.loseSightTimer, 4.0);
+        if (actor.state !== 'attack') {
+          actor.state = 'chase';
+        }
+        actor.investigateX = actor.siegeTargetX;
+        actor.investigateZ = actor.siegeTargetZ;
       } else {
         if (actor.state === 'chase' || actor.state === 'attack') {
           actor.loseSightTimer -= dt;
@@ -1755,6 +2442,7 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
         actor.fireFleeZ = scratchFirePos.z;
         actor.attackSwingTimer = 0;
         actor.attackHitDelivered = true;
+        actor.bashingStructId = null;
         if (actor.glbRig) {
           actor.glbRig.wAttack = 0;
           if (actor.glbRig.attackAction) {
@@ -1785,7 +2473,31 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
           desiredMoveZ = -1;
         }
         moveSpeed = actor.spec.chaseSpeed * 0.86;
+      } else if (actor.bashingStructId !== null) {
+        // Active structure-bashing swing in progress
+        const lookYaw = Math.atan2(-(actor.bashingStructX - actor.x), -(actor.bashingStructZ - actor.z));
+        actor.yaw = lerpAngle(actor.yaw, lookYaw, Math.min(1, dt * 10));
+
+        if (
+          !actor.bashingStructHitDelivered &&
+          actor.attackSwingTimer <= 0.72 - RAIDER_ATTACK_HIT_DELAY
+        ) {
+          actor.bashingStructHitDelivered = true;
+          if (damageStructure) {
+            const bashDmg = actor.spec.isMonster
+              ? STALKER_STRUCT_BASH_DAMAGE
+              : RAIDER_STRUCT_BASH_DAMAGE;
+            const res = damageStructure(actor.bashingStructId, bashDmg);
+            if (res.hit && onStructureBashed) {
+              onStructureBashed(res.destroyed, res.label, res.x, res.z);
+            }
+          }
+        }
+        if (actor.attackSwingTimer <= 0) {
+          actor.bashingStructId = null;
+        }
       } else if (actor.state === 'attack') {
+        const verticalDistToPlayer = Math.abs(input.playerY - actor.y);
         const lookYaw = Math.atan2(-dxToPlayer, -dzToPlayer);
         actor.yaw = lerpAngle(actor.yaw, lookYaw, Math.min(1, dt * 10));
 
@@ -1795,7 +2507,12 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
           actor.attackSwingTimer <= 0.72 - RAIDER_ATTACK_HIT_DELAY
         ) {
           actor.attackHitDelivered = true;
-          if (!playerDead && distToPlayer <= attackRange + 0.55 && onPlayerHit) {
+          if (
+            !playerDead &&
+            distToPlayer <= attackRange + 0.55 &&
+            verticalDistToPlayer <= 1.75 &&
+            onPlayerHit
+          ) {
             onPlayerHit(actor.spec.attackDamage, actor.x, actor.z);
           }
         }
@@ -1809,13 +2526,23 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
           }
         }
       } else if (actor.state === 'chase') {
-        const targetX = seesPlayer ? playerX : actor.investigateX;
-        const targetZ = seesPlayer ? playerZ : actor.investigateZ;
-        const toX = targetX - actor.x;
-        const toZ = targetZ - actor.z;
-        const dist = Math.hypot(toX, toZ);
+        const verticalDistToPlayer = Math.abs(input.playerY - actor.y);
+        const playerDirectMeleeReach =
+          seesPlayer && !playerDead && distToPlayer < 2.1 && verticalDistToPlayer <= 1.75;
+        const nearBuiltStructure =
+          !playerDirectMeleeReach &&
+          findNearestStructure !== undefined &&
+          damageStructure !== undefined &&
+          (actor.isSieging || !seesPlayer || distToPlayer > 2.1 || verticalDistToPlayer > 1.75) &&
+          findNearestStructure(actor.x, actor.z, STRUCT_BASH_RANGE, scratchStructProbe, actor.y);
 
-        if (seesPlayer && !playerDead && distToPlayer <= attackRange && actor.attackCooldown <= 0) {
+        if (
+          seesPlayer &&
+          !playerDead &&
+          distToPlayer <= attackRange &&
+          verticalDistToPlayer <= 1.75 &&
+          actor.attackCooldown <= 0
+        ) {
           actor.state = 'attack';
           actor.attackCooldown = RAIDER_ATTACK_CADENCE;
           actor.attackSwingTimer = 0.72;
@@ -1827,13 +2554,44 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
             actor.glbRig.attackAction.timeScale = 1.25;
             actor.glbRig.attackAction.play();
           }
-        } else if (dist > 0.65) {
-          desiredMoveX = toX / dist;
-          desiredMoveZ = toZ / dist;
-          moveSpeed =
-            actor.spec.isMonster && !nocturnalHunt
-              ? Math.min(actor.spec.chaseSpeed, 4.75)
-              : actor.spec.chaseSpeed;
+        } else if (nearBuiltStructure) {
+          // Face the wall/barricade and bash it down on structure-bash cooldown!
+          const lookYaw = Math.atan2(
+            -(scratchStructProbe.x - actor.x),
+            -(scratchStructProbe.z - actor.z),
+          );
+          actor.yaw = lerpAngle(actor.yaw, lookYaw, Math.min(1, dt * 10));
+          if (actor.structBashCooldown <= 0 && actor.attackSwingTimer <= 0) {
+            actor.bashingStructId = scratchStructProbe.id;
+            actor.bashingStructX = scratchStructProbe.x;
+            actor.bashingStructZ = scratchStructProbe.z;
+            actor.bashingStructHitDelivered = false;
+            actor.attackSwingTimer = 0.72;
+            actor.structBashCooldown = actor.spec.isMonster
+              ? STALKER_STRUCT_BASH_COOLDOWN
+              : RAIDER_STRUCT_BASH_COOLDOWN;
+            if (actor.glbRig?.attackAction) {
+              actor.glbRig.attackAction.reset();
+              actor.glbRig.attackAction.setLoop(THREE.LoopOnce, 1);
+              actor.glbRig.attackAction.clampWhenFinished = true;
+              actor.glbRig.attackAction.timeScale = 1.25;
+              actor.glbRig.attackAction.play();
+            }
+          }
+        } else {
+          const targetX = seesPlayer ? playerX : actor.investigateX;
+          const targetZ = seesPlayer ? playerZ : actor.investigateZ;
+          const toX = targetX - actor.x;
+          const toZ = targetZ - actor.z;
+          const dist = Math.hypot(toX, toZ);
+          if (dist > 0.65) {
+            desiredMoveX = toX / dist;
+            desiredMoveZ = toZ / dist;
+            moveSpeed =
+              actor.spec.isMonster && !nocturnalHunt
+                ? Math.min(actor.spec.chaseSpeed, 4.75)
+                : actor.spec.chaseSpeed;
+          }
         }
       } else if (actor.state === 'investigate') {
         const toX = actor.investigateX - actor.x;
@@ -1843,10 +2601,8 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
           desiredMoveX = toX / dist;
           desiredMoveZ = toZ / dist;
           moveSpeed = actor.spec.investigateSpeed;
-          // Decay timer while traveling too so unreachable lures behind walls never soft-lock AI
           actor.investigateTimer -= dt * 0.55;
         } else {
-          // Arrived at last known spot: scan left and right before returning to patrol
           actor.investigateTimer -= dt;
           actor.yaw += Math.sin(elapsed * 1.45 + i * 2) * dt * 0.75;
         }
@@ -1856,11 +2612,9 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
           actor.waypointPause = 0.8;
         }
       } else if (actor.state === 'suspicious') {
-        // Pause and turn cautiously toward spotted movement
         const lookYaw = Math.atan2(-(actor.investigateX - actor.x), -(actor.investigateZ - actor.z));
         actor.yaw = lerpAngle(actor.yaw, lookYaw, Math.min(1, dt * 5.5));
       } else {
-        // Patrol waypoint loop (Hollow Stalker expands northward toward highway ruins at night or during storms)
         const activeWaypoints =
           actor.spec.isMonster && nocturnalHunt && actor.spec.nightWaypoints
             ? actor.spec.nightWaypoints
@@ -1900,7 +2654,7 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
 
         scratchMovePos.x = actor.x + desiredMoveX * moveSpeed * dt;
         scratchMovePos.z = actor.z + desiredMoveZ * moveSpeed * dt;
-        const hitObs = resolveHorizontalCollision(scratchMovePos, RAIDER_RADIUS, obstacles);
+        const hitObs = resolveHorizontalCollision(scratchMovePos, RAIDER_RADIUS, obstacles, actor.y);
 
         actor.x = scratchMovePos.x;
         actor.z = scratchMovePos.z;
@@ -1918,7 +2672,7 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
         actor.speed += (0 - actor.speed) * Math.min(1, dt * 10);
       }
 
-      actor.y = sampleSupportHeight(actor.x, actor.z);
+      actor.y = sampleSupportHeight(actor.x, actor.z, actor.y);
       actor.root.position.set(actor.x, actor.y, actor.z);
       actor.root.rotation.y = actor.yaw;
 
@@ -1926,27 +2680,15 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       if (
         checkSpikeHit !== undefined &&
         actor.spikeHitCooldown <= 0 &&
-        checkSpikeHit(actor.x, actor.z, RAIDER_RADIUS)
+        checkSpikeHit(actor.x, actor.z, RAIDER_RADIUS, actor.y)
       ) {
         actor.spikeHitCooldown = 0.95;
         actor.hp = Math.max(0, actor.hp - 18);
         actor.attackSwingTimer = 0;
         actor.attackHitDelivered = true;
+        actor.bashingStructId = null;
         if (actor.hp <= 0) {
-          actor.state = 'downed';
-          actor.awareness = 0;
-          actor.speed = 0;
-          actor.statusSprite.visible = false;
-          if (actor.eyeEmberGroup) {
-            actor.eyeEmberGroup.visible = false;
-          }
-          if (actor.glbRig?.deathAction) {
-            actor.glbRig.deathAction.reset();
-            actor.glbRig.deathAction.setLoop(THREE.LoopOnce, 1);
-            actor.glbRig.deathAction.clampWhenFinished = true;
-            actor.glbRig.deathAction.timeScale = 1.15;
-            actor.glbRig.deathAction.play();
-          }
+          downActor(actor);
           if (onSpikeHit) {
             onSpikeHit(actor.x, actor.z, true, actor.spec.isMonster, actor.spec.dropLoot);
           }
@@ -2009,6 +2751,8 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       updateRaiderAnimation(actor, dt, elapsed);
     }
 
+    checkSiegeRepelled();
+
     globalAlert = highestAlert;
     if (onAlertSting) {
       if (globalAlert === 'alert' && prevGlobalAlert !== 'alert') {
@@ -2036,12 +2780,26 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
 
   function reset(): void {
     globalAlert = 'unaware';
+    siegeActive = false;
+    siegeWave = 0;
+    siegeCooldown = 0;
+    siegeBuildupTimer = 0;
 
     for (let i = 0; i < bottles.length; i += 1) {
       const b = bottles[i];
       if (b) {
         b.active = false;
         b.mesh.visible = false;
+      }
+    }
+    for (let i = 0; i < arrows.length; i += 1) {
+      const arrow = arrows[i];
+      if (arrow) {
+        arrow.active = false;
+        arrow.stuck = false;
+        arrow.age = 0;
+        arrow.stuckTimer = 0;
+        arrow.group.visible = false;
       }
     }
     for (let i = 0; i < shatterBursts.length; i += 1) {
@@ -2089,6 +2847,14 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       actor.shriekCooldown = 0;
       actor.downProgress = 0;
       actor.blockedTimer = 0;
+      actor.isSieging = false;
+      actor.siegeTargetX = spec.spawnX;
+      actor.siegeTargetZ = spec.spawnZ;
+      actor.structBashCooldown = 0;
+      actor.bashingStructId = null;
+      actor.bashingStructX = 0;
+      actor.bashingStructZ = 0;
+      actor.bashingStructHitDelivered = false;
       if (actor.eyeEmberGroup) {
         actor.eyeEmberGroup.visible = true;
       }
@@ -2141,13 +2907,13 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
       actor.statusMat.dispose();
     }
 
-    // disposeObjectTree disposes bottleGeo, shatter geometries/materials, procedural & GLB trees cleanly once
+    // disposeObjectTree disposes bottleGeo, arrows (fallback or GLB clones), shatter pools, procedural & GLB rigs once
     disposeObjectTree(root, sharedProceduralMaterials);
     for (const mat of sharedProceduralMaterials) {
       mat.dispose();
     }
-    questionTex.dispose();
-    alertTex.dispose();
+    questionTex?.dispose();
+    alertTex?.dispose();
     root.clear();
   }
 
@@ -2157,6 +2923,9 @@ export function createThreatSystem(options: ThreatSystemOptions): ThreatSystem {
     emitNoise,
     tryPlayerMeleeHit,
     throwBottle,
+    shootArrow,
+    triggerSiegeWave,
+    getSiegeStatus,
     getAlertState,
     getAliveCount,
     reset,

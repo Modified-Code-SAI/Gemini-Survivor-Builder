@@ -5,6 +5,8 @@ export interface FlashlightSystem {
   toggle(): boolean;
   isOn(): boolean;
   getBattery(): number;
+  setUpgraded(upgraded: boolean): void;
+  isUpgraded(): boolean;
   getBeamExposure(targetX: number, targetY: number, targetZ: number): number;
   setQuality(quality: GraphicsQuality): void;
   update(
@@ -24,12 +26,20 @@ export interface FlashlightSystem {
 
 const CONE_LENGTH = 16;
 const SPOT_ANGLE = 0.45;
+const UPGRADED_CONE_RADIUS_SCALE = 1.18;
+const UPGRADED_SPOT_ANGLE = Math.atan(Math.tan(SPOT_ANGLE) * UPGRADED_CONE_RADIUS_SCALE);
 const CONE_RADIUS = CONE_LENGTH * Math.tan(SPOT_ANGLE) * 0.92;
 const BASE_INTENSITY = 28;
+const BASE_DISTANCE = 38;
+const UPGRADED_INTENSITY_SCALE = 1.35;
+const UPGRADED_DISTANCE_SCALE = 1.35;
 const BATTERY_DRAIN_PER_SEC = 1.5;
 const BATTERY_RECHARGE_PER_SEC = 5.5;
+const UPGRADED_DRAIN_SCALE = 0.5;
+const UPGRADED_RECHARGE_SCALE = 1.5;
 const MIN_REACTIVATE_BATTERY = 8;
 const BEAM_EXPOSURE_RANGE = 24;
+const UPGRADED_EXPOSURE_SCALE = 1.3;
 
 const CONE_VERTEX_SHADER = /* glsl */ `
   varying vec3 vNormalView;
@@ -55,7 +65,7 @@ const CONE_FRAGMENT_SHADER = /* glsl */ `
   void main() {
     float ndotv = abs(dot(normalize(vNormalView), normalize(-vViewPos)));
     // Soft Fresnel roll-off eliminates hard cone polygon silhouettes from every angle
-    float edgeSoft = pow(ndotv, 1.9);
+    float edgeSoft = pow(max(0.0, ndotv), 1.9);
     float nearFade = smoothstep(0.0, 0.075, vAxial);
     float farFade = pow(max(0.0, 1.0 - vAxial), 1.8);
     float alpha = edgeSoft * nearFade * farFade * uOpacity;
@@ -74,11 +84,11 @@ export function createFlashlightSystem(
   scene: THREE.Scene,
   initialQuality: GraphicsQuality,
 ): FlashlightSystem {
-  const spotLight = new THREE.SpotLight('#fff2d6', 0, 38, SPOT_ANGLE, 0.62, 1.5);
+  const spotLight = new THREE.SpotLight('#fff2d6', 0, BASE_DISTANCE, SPOT_ANGLE, 0.62, 1.5);
   spotLight.castShadow = initialQuality === 'high';
   spotLight.shadow.mapSize.set(1024, 1024);
   spotLight.shadow.camera.near = 0.28;
-  spotLight.shadow.camera.far = 38;
+  spotLight.shadow.camera.far = BASE_DISTANCE;
   spotLight.shadow.bias = -0.00045;
   spotLight.shadow.normalBias = 0.032;
   spotLight.shadow.focus = 1;
@@ -115,6 +125,7 @@ export function createFlashlightSystem(
   scene.add(coneMesh);
 
   let active = false;
+  let upgraded = false;
   let battery = 100;
   let flickerFactor = 1;
   let initialized = false;
@@ -125,8 +136,23 @@ export function createFlashlightSystem(
   const desiredAim = new THREE.Vector3(0, 0, -1);
   const targetPoint = new THREE.Vector3();
 
-  const cosOuter = Math.cos(SPOT_ANGLE * 1.04);
-  const cosInner = Math.cos(SPOT_ANGLE * 0.52);
+  const cosOuterBase = Math.cos(SPOT_ANGLE * 1.04);
+  const cosInnerBase = Math.cos(SPOT_ANGLE * 0.52);
+  const cosOuterUpgraded = Math.cos(UPGRADED_SPOT_ANGLE * 1.04);
+  const cosInnerUpgraded = Math.cos(UPGRADED_SPOT_ANGLE * 0.52);
+
+  function applyUpgradeProfile(): void {
+    const dist = upgraded ? BASE_DISTANCE * UPGRADED_DISTANCE_SCALE : BASE_DISTANCE;
+    spotLight.distance = dist;
+    spotLight.angle = upgraded ? UPGRADED_SPOT_ANGLE : SPOT_ANGLE;
+    spotLight.shadow.camera.far = dist;
+    spotLight.shadow.camera.updateProjectionMatrix();
+    coneMesh.scale.set(
+      upgraded ? UPGRADED_CONE_RADIUS_SCALE : 1,
+      upgraded ? UPGRADED_CONE_RADIUS_SCALE : 1,
+      upgraded ? 1.25 : 1,
+    );
+  }
 
   return {
     toggle(): boolean {
@@ -149,6 +175,16 @@ export function createFlashlightSystem(
     getBattery(): number {
       return battery;
     },
+    setUpgraded(nextUpgraded: boolean): void {
+      if (upgraded === nextUpgraded) {
+        return;
+      }
+      upgraded = nextUpgraded;
+      applyUpgradeProfile();
+    },
+    isUpgraded(): boolean {
+      return upgraded;
+    },
     getBeamExposure(targetX: number, targetY: number, targetZ: number): number {
       if (!active || flickerFactor <= 0.05) {
         return 0;
@@ -156,19 +192,23 @@ export function createFlashlightSystem(
       const dx = targetX - currentPos.x;
       const dy = targetY - currentPos.y;
       const dz = targetZ - currentPos.z;
+      const maxRange = upgraded ? BEAM_EXPOSURE_RANGE * 1.25 : BEAM_EXPOSURE_RANGE;
       const distSq = dx * dx + dy * dy + dz * dz;
-      if (distSq < 0.04 || distSq > BEAM_EXPOSURE_RANGE * BEAM_EXPOSURE_RANGE) {
+      if (distSq < 0.04 || distSq > maxRange * maxRange) {
         return 0;
       }
       const dist = Math.sqrt(distSq);
       const invDist = 1 / dist;
       const dot = (dx * currentAim.x + dy * currentAim.y + dz * currentAim.z) * invDist;
+      const cosOuter = upgraded ? cosOuterUpgraded : cosOuterBase;
+      const cosInner = upgraded ? cosInnerUpgraded : cosInnerBase;
       if (dot <= cosOuter) {
         return 0;
       }
       const coneAtten = clampVal((dot - cosOuter) / Math.max(0.001, cosInner - cosOuter), 0, 1);
-      const distAtten = Math.pow(1 - dist / BEAM_EXPOSURE_RANGE, 1.15);
-      return clampVal(coneAtten * distAtten * flickerFactor, 0, 1);
+      const distAtten = Math.pow(Math.max(0, 1 - dist / maxRange), 1.15);
+      const exposureScale = upgraded ? UPGRADED_EXPOSURE_SCALE : 1.0;
+      return clampVal(coneAtten * distAtten * flickerFactor * exposureScale, 0, 1);
     },
     setQuality(quality: GraphicsQuality): void {
       const wantShadow = quality === 'high';
@@ -194,12 +234,15 @@ export function createFlashlightSystem(
       const safeDt = Math.max(0, Math.min(dt, 0.1));
 
       if (active) {
-        battery = Math.max(0, battery - BATTERY_DRAIN_PER_SEC * safeDt);
+        const drainRate = BATTERY_DRAIN_PER_SEC * (upgraded ? UPGRADED_DRAIN_SCALE : 1.0);
+        battery = Math.max(0, battery - drainRate * safeDt);
         if (battery <= 0) {
           active = false;
         }
       } else {
-        battery = Math.min(100, battery + BATTERY_RECHARGE_PER_SEC * safeDt);
+        const rechargeRate =
+          BATTERY_RECHARGE_PER_SEC * (upgraded ? UPGRADED_RECHARGE_SCALE : 1.0);
+        battery = Math.min(100, battery + rechargeRate * safeDt);
       }
 
       desiredAim.set(aimX, aimY, aimZ);
@@ -254,7 +297,8 @@ export function createFlashlightSystem(
       spotLight.position.copy(currentPos);
       spotLight.target.position.copy(targetPoint);
       spotLight.target.updateMatrixWorld();
-      spotLight.intensity = BASE_INTENSITY * flickerFactor;
+      spotLight.intensity =
+        BASE_INTENSITY * (upgraded ? UPGRADED_INTENSITY_SCALE : 1.0) * flickerFactor;
 
       // Subtle volumetric mist beam intensifies organically in darkness, fog, and rain
       const clampedFogBoost = clampVal(fogBoost, 0, 1.5);
@@ -266,6 +310,10 @@ export function createFlashlightSystem(
     },
     reset(): void {
       active = false;
+      if (upgraded) {
+        upgraded = false;
+        applyUpgradeProfile();
+      }
       battery = 100;
       flickerFactor = 1;
       initialized = false;

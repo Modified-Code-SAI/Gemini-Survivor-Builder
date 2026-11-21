@@ -6,7 +6,7 @@
 
 - **GitHub Repository:** `https://github.com/Modified-Code-SAI/Gemini-Survivor-Builder`
 - **Live Playable Tester URL (GitHub Pages):** `https://modified-code-sai.github.io/Gemini-Survivor-Builder/`
-  - Served from orphan branch `gh-pages` (`7ef2d4c` — v0.1.0 vertical slice). **Keep untouched for external playtesters until explicit user sign-off.**
+  - Served from orphan branch `gh-pages` (`db4559b` — Phase 1 + Option A Asset Pass). **Keep untouched for external playtesters until explicit user sign-off.**
 - **Local Dev Server:** `http://localhost:5173/` (`npm run dev -- --port 5173`)
 - **Full Quality Gate:** `npm run verify` (`npm run typecheck && npm run lint && npm test && npm run build`)
 
@@ -14,52 +14,42 @@
 
 | Branch | Commit / Tag | Scope & Health |
 | --- | --- | --- |
-| `main` | `985b73d` (`v0.1.0-vertical-slice`) | Stable Milestones 1–4 vertical slice, 15 Git LFS binary assets (`33 MB`), `30/30` Vitest tests passing. |
-| `gh-pages` | `7ef2d4c` | Orphan branch serving compiled `dist/` + `.nojekyll` with direct non-LFS binary assets on GitHub Pages. |
-| `feat/modular-building` *(active)* | `ac9cf8e` + Playtest Polish & Option A Asset Pass *(uncommitted)* | **Phase 1 — Full Survival Builder Expansion + Playtest Polish & Option A Asset Pass** complete, `41/41` Vitest tests passing across `9` files, both `Overgrown Frontier` and `C:\GameDev` isolated `reviewer`s APPROVED, live browser verification PASS at `http://localhost:5173/` with all `9` GLBs + `10` textures loading `200 OK` and `0` JS/WebGL errors. |
+| `main` | `c83eec1` | Phase 1 + Playtest Polish & Option A Asset Pass merged cleanly (`41/41` tests at merge). |
+| `gh-pages` | `db4559b` | Live tester build at `https://modified-code-sai.github.io/Gemini-Survivor-Builder/` (Phase 1 + Option A, all 9 direct non-LFS `.glb` assets verified `200 OK`). **Keep untouched until explicit user sign-off.** |
+| `feat/phase2-base-sieges` *(active)* | `c83eec1` + Full Phase 2 *(uncommitted)* | **Full Phase 2 — Base Sieges, Structural Durability, Multi-Story & Gear Progression** complete, `10` test files / `51/51` Vitest tests passing, both `Overgrown Frontier` and `C:\GameDev` isolated `reviewer`s APPROVED, live browser playtest verified at `http://localhost:5173/` (`12` GLBs + `10` textures `200 OK`, `0` JS/WebGL errors). |
 
-## What Is Shipped on `feat/modular-building` (Phase 1)
+## What Is Shipped on `feat/phase2-base-sieges` (Phase 2)
 
-1. **Physical Tool Harvesting & Natural Forest (`src/world/environment.ts`, `src/systems/harvest.ts`):**
-   - Removed the 14 artificial tan-banded trees (`blazeRingGeo`) completely; ALL playable valley forest trees across all 5 species (Douglas Fir, Sitka Spruce, Broad Pine, Red Alder, Dead Snag inside `|x| <= 54, z in [-88, 34]`) are now choppable directly out of their GPU `InstancedMesh` batches (per-hit recoil shake, 3 Axe chops -> `10 Wood`, 4-slot pre-allocated species-accurate `YXZ` falling-tree pool, instanced cut wood stumps with `r in [0.28, 0.42] < 0.55` LOS cap).
-   - **10 mossy Pacific Northwest granite outcrops** (`HARVEST_ROCK_SPECS`; 3 Pickaxe strikes -> `9 Stone + 1 Scrap`, stone-shard burst pool, shrink-on-hit, collider removed on shatter), with `depletedHarvestIds` persistence cap raised to `320`.
+1. **Multi-Story Building, Height-Banded Collision & Vertical Isolation (`src/world/terrain.ts`, `src/systems/building.ts`, `src/systems/stealth.ts`, `src/systems/threats.ts`):**
+   - Expanded `[Tab]` Build Mode to **10 modular pieces** (`#build-slot-0..9`, `[1–9, 0]` / scroll wheel, cap raised to `96`): `Foundation`, `Wall`, `Window Wall` (arrow-passable shooting embrasure), `Doorway`, `Roof`, `Timber Stairs` (smooth continuous climb ramp), `Upper Floor Deck` (shelters 1st floor beneath it & supports 2nd-story walls/roofs), `Defensive Spikes`, `Storage Crate`, and `Workbench`.
+   - Added height-banded `minY`/`maxY` bounds on `ObstacleCircle`/`ObstacleBox`/`ObstacleObb` in `resolveHorizontalCollision(..., actorY)` and height-aware `hasLineOfSight(..., eyeY)` so 2nd-story walls/closed doors never block 1st-story open doorways or ground AI sightlines.
+   - Enforced full multi-story vertical isolation across `getFloorHeightAt(..., currentY)`, `isInsideBuiltShelter(..., actorY)`, `getInteractTarget(..., playerY)`, `checkSpikeHit(..., actorY)`, `findNearestAttackableStructure(..., actorY)`, `threats.update` melee reach (`<= 1.75 m`), and `tryPlayerMeleeHit(..., playerY)`.
 
-2. **Upright Sculpted Tools & Tool-Specific MoCap Swings (`src/player/controller.ts`, `survivor.glb`, `felling_axe.glb`, `pickaxe.glb`):**
-   - Authored AAA PBR `felling_axe.glb` (`625 KB`) and `pickaxe.glb` (`624 KB`) via Blender 5.2.4 LTS, switchable via `[4]` Felling Axe, `[5]` Pickaxe, and `[6]` / `[Q]` Bare Fists, and mounted upright on `hand_R` with calibrated forward-blade grip (`HAND_TOOL_GRIP_QUATERNION`).
-   - Baked two new MoCap-grounded clips into `survivor.glb` (`17` clips total): horizontal-diagonal lumberjack `axe_swing` and overhead-downward `pickaxe_swing`, strictly gating bare-fist punches to `[6]`.
+2. **Structural Durability, Visual Wear & Repair Hammer (`src/systems/building.ts`, `src/player/controller.ts`, `repair_hammer.glb`):**
+   - Assigned per-piece durability (`BUILD_MAX_HP`: Foundation `240`, Wall/Upper Floor `180`, Window Wall `150`, Doorway/Stairs `160`, Roof `140`, Spikes `100` with `14` wear per hit, Workbench `130`, Storage `120`) with live worn timber visual darkening, damage tilt/lean, hit shake, splinter/repair burst pool, collapse obstacle cleanup, and persistent damaged HP (`Math.max(1, Math.round(p.hp))`).
+   - Authored AAA PBR `repair_hammer.glb` (`390 KB`, `[8]`) with priority damaged-structure repair swings (`1 Wood` -> `+45 HP`), `playRepairHammer()` SFX, and contextual damaged-structure HP/repair HUD prompts.
 
-3. **Sculpted Animated Pacific Northwest Wildlife (`src/systems/wildlife.ts`, `whitetail_deer.glb`, `pacific_raven.glb`):**
-   - Generated via SDXL + Hunyuan3D-2 and rigged/animated in Blender 5.2.4 LTS — `whitetail_deer.glb` (`824 KB`, 26 bones, `SkeletonUtils.clone`, clean buck/doe `Antlers` toggle, `idle_graze`/`alert`/`trot`/`gallop`) and `pacific_raven.glb` (`800 KB`, 14 bones, `glide`/`flap`).
+3. **Night & Storm Base Sieges & Structure-Bashing AI (`src/systems/threats.ts`, `src/systems/audio.ts`, `index.html`, `src/main.ts`):**
+   - Added 4th hostile (`ridge_skirmisher`) and Night/Storm Siege Director (auto-triggers after `16 s` of deep night/storm near any built base or campfire anchor, plus `[N]` manual rally trigger) rallying escalating 3–4 hostile waves with pulsing top-center `#hud-siege` banner, war/repel horn SFX (`playSiegeHorn`), and wave-repel loot rewards (`3 Scrap, 3 Wood, 4 Arrows`).
+   - Upgraded Raiders & Hollow Stalker to bash blocking ground-level built structures (`playStructureBash`, structure-breached toast & persistence) whenever chasing/sieging behind fortifications or below a 2nd-story watchtower defender.
 
-4. **Snap-Together Modular Base Building (`src/systems/building.ts`):**
-   - `[Tab]` toggles **Build Mode** with translucent `#build-bar`, live green/red ghost preview (`excludeFromGtao = true`), `[1–7]` / scroll wheel selection, `[R]` 45° rotate, `[Click / F / Enter]` place, and `[X]` 50% rounded-up dismantle refund (`t in [2.2, 9.0]`).
-   - **7 Modular Pieces** (max 64):
-     - `Foundation` (`4W 1St`) — edge-to-edge `3.0 m` snapping, `2.6 m` sloped hillside piers, elevated floor support (`getSupportHeight`) shared across player, Raiders, and Hollow Stalker.
-     - `Wall` (`3W`) & `Doorway` (`3W 1Sc`) — single-story solid foundation-edge snapping; Doorway features animated hinged door leaf toggled via `[E]` that dynamically removes/restores its center OBB collider.
-     - `Roof` (`3W`) — snaps onto foundation bays or freestanding wall tops; `isInsideBuiltShelter()` shields from rainstorms, restores warmth, and muffles rain audio.
-     - `Defensive Spikes` (`2W 1Sc`) — damages (`18 HP`), staggers (`0.38 s`), and pushes back Raiders and Hollow Stalkers on contact, dropping loot if lethal.
-     - `Storage Crate` (`3W 1Sc`) — zero-modal smart deposit/withdraw via `[E]`.
-     - `Workbench` (`4W 2St 2Sc`) — `[E]` crafts active recipe (`[Z]` switches: `Field Ration`, `Medkit`, `Hand Warmer`, `Glass Bottle`).
-
-5. **Persistent Save/Load (`src/systems/persistence.ts`):**
-   - Versioned `localStorage` schema (`overgrown_frontier_save_v1`) persisting player position/yaw (clamped to `WORLD_BOUNDS`), time of day, survival vitals & inventory, built pieces & door states, storage stash, campfires & lean-to shelters, looted caches, and depleted harvest nodes (`depletedHarvestIds <= 320`).
-   - Auto-saves on major state mutations, every `20 s`, and on `beforeunload`; `[F5]` manual Quick Save; start overlay shows **Continue Saved World** + **Reset World** whenever a save exists.
-
-6. **Chrome Pointer-Lock Hardening (`src/player/controller.ts`):**
-   - `wasPointerLocked` guard prevents Chrome pointer-lock cooldown or focus bounce from re-opening the pause menu.
-   - Smooth mouse-drag look fallback when unlocked (`buttons & 1 || buttons & 2`), plus short-click (`< 5 px`) unlocked canvas placement in Build Mode alongside `[F]` and `[Enter]`.
+4. **Workbench Weapons & Gear Progression (`src/systems/survival.ts`, `src/systems/harvest.ts`, `src/systems/flashlight.ts`, `src/player/controller.ts`, `compound_bow.glb`, `arrow.glb`, `survivor.glb`):**
+   - Expanded Workbench crafting (`[Z]` cycles, auto-skipping owned one-time unlocks) to **10 recipes**: consumables (`Field Ration`, `Medkit`, `Hand Warmer`, `Glass Bottle`, `4x Broadhead Arrows`) + 5 persistent gear unlocks (`Repair Hammer`, `Compound Bow`, `Reinforced Steel Tools`, `Upgraded Flashlight`, `Improvised Scrap Armor`).
+   - Authored AAA PBR `compound_bow.glb` (`475 KB`, `[7]`, mounted on `hand_L` with calibrated carry-to-aim quaternion slerp), `arrow.glb` (`120 KB`, 12-slot pooled substepped ballistic arrows flying through `window_wall` embrasures with headshot/unaware crits & subtle `3.5 m` stealth noise), and baked the 18th MoCap clip (`bow_shoot`) into `survivor.glb` (`4.07 MB`).
+   - **Reinforced Steel Tools** upgrade Felling Axe & Pickaxe visuals (`Steel Axe`/`Steel Pick`), speed up harvesting to 2 hits (`hitPower = 2`), and boost tool melee damage to `52`; **Upgraded Flashlight** doubles battery endurance & widens beam reach; **Scrap Armor** reduces incoming combat damage by `38%` (`#hud-armor` badge).
+   - Backward-compatible v1 save persistence (`overgrown_frontier_save_v1`) stores `builtPieces` (up to `96`, with optional `hp`), `inventory.arrows`, and `survival.gear`.
 
 ## Current Verification Baseline
 
 - `npm run typecheck` (`tsc --noEmit`): **PASS** (0 errors)
 - `npm run lint` (`eslint src`): **PASS** (0 errors, 0 warnings)
-- `npm test` (`vitest run`): **PASS** (9 test files, `41/41` tests)
-- `npm run build` (`vite build`): **PASS** (42 modules bundled cleanly)
+- `npm test` (`vitest run`): **PASS** (`10` test files, `51/51` tests)
+- `npm run build` (`vite build`): **PASS** (`42` modules bundled cleanly)
 
 ## Current Next Step
 
-- **Ready for user's follow-up hands-on playtest** on `feat/modular-building` at `http://localhost:5173/`.
-- Next decision options once tested:
-  1. Commit the Phase 1 Playtest Polish & Option A Asset Pass changes on `feat/modular-building` (and apply any further tuning requested).
-  2. Merge `feat/modular-building` -> `main` and publish updated build to `gh-pages` (using `.agents/skills/deploy-gh-pages/SKILL.md`, only on explicit user approval).
-  3. Begin **Phase 2** (structural wall/door health & repair hammer, active Night & Storm Base Sieges, Workbench weapon/gear progression, multi-story stairs) — see `docs/ROADMAP.md`.
+- **Ready for user's hands-on playtest** on Full Phase 2 (`feat/phase2-base-sieges` at `http://localhost:5173/`).
+- Next decision options once playtested:
+  1. Apply any requested Phase 2 combat/siege/building tuning, then commit on `feat/phase2-base-sieges`.
+  2. Merge `feat/phase2-base-sieges` -> `main` and publish updated build to `gh-pages` (using `.agents/skills/deploy-gh-pages/SKILL.md`, only on explicit user approval).
+  3. Begin **Phase 3 — Connected Biome II: Flooded Industrial Docks** (see `docs/ROADMAP.md`).

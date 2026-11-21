@@ -26,6 +26,9 @@ export const DEFAULT_GLB_SLOT_MANIFEST: Readonly<Record<string, string>> = {
   pickaxe: './assets/pickaxe.glb',
   whitetail_deer: './assets/whitetail_deer.glb',
   pacific_raven: './assets/pacific_raven.glb',
+  repair_hammer: './assets/repair_hammer.glb',
+  compound_bow: './assets/compound_bow.glb',
+  arrow: './assets/arrow.glb',
 };
 
 let sharedLoader: GLTFLoader | null = null;

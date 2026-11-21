@@ -178,6 +178,7 @@ function segmentIntersectsCircle(
 /**
  * Fast zero-allocation 2D line-of-sight occlusion test against ruins, boulders, and wrecked vehicles.
  * Thin tree trunks and utility poles (radius < 0.55 m) are skipped so foliage trunks don't fully blind AI.
+ * When optional `eyeY` is provided, height-banded multi-story obstacles outside that elevation are skipped.
  */
 export function hasLineOfSight(
   ax: number,
@@ -185,11 +186,21 @@ export function hasLineOfSight(
   bx: number,
   bz: number,
   obstacles: readonly Obstacle[],
+  eyeY?: number,
 ): boolean {
   for (let i = 0; i < obstacles.length; i += 1) {
     const obs = obstacles[i];
     if (!obs) {
       continue;
+    }
+
+    if (eyeY !== undefined) {
+      if (
+        (obs.minY !== undefined && eyeY < obs.minY) ||
+        (obs.maxY !== undefined && eyeY > obs.maxY)
+      ) {
+        continue;
+      }
     }
 
     if (obs.kind === 'circle') {

@@ -37,6 +37,11 @@ export interface FrontierAudio {
   playDismantle(): void;
   playDoorToggle(open: boolean): void;
   playSpikeHit(): void;
+  playBowShoot(): void;
+  playArrowImpact(hitEnemy: boolean): void;
+  playRepairHammer(): void;
+  playStructureBash(destroyed: boolean): void;
+  playSiegeHorn(repelled: boolean): void;
   update(elapsed: number, dt: number, spatial?: SpatialAudioState): void;
   dispose(): void;
 }
@@ -2034,6 +2039,297 @@ export function createFrontierAudio(): FrontierAudio {
     crunch.stop(now + 0.14);
   }
 
+  function playBowShoot(): void {
+    if (!ctx || !masterGain || !noiseBurstBuffer || muted || ctx.state !== 'running') {
+      return;
+    }
+    const now = ctx.currentTime;
+    const jitter = 0.96 + Math.random() * 0.08;
+
+    // Taut bowstring twang
+    const stringOsc = ctx.createOscillator();
+    const stringGain = ctx.createGain();
+    stringOsc.type = 'triangle';
+    stringOsc.frequency.setValueAtTime(248 * jitter, now);
+    stringOsc.frequency.exponentialRampToValueAtTime(116 * jitter, now + 0.17);
+    stringGain.gain.setValueAtTime(0.0001, now);
+    stringGain.gain.linearRampToValueAtTime(0.2, now + 0.006);
+    stringGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.19);
+    stringOsc.connect(stringGain);
+    stringGain.connect(masterGain);
+    stringOsc.onended = () => {
+      safeDisconnect(stringOsc);
+      safeDisconnect(stringGain);
+    };
+    stringOsc.start(now);
+    stringOsc.stop(now + 0.21);
+
+    // Subtle metallic compound-bow cable harmonic snap
+    const snapOsc = ctx.createOscillator();
+    const snapGain = ctx.createGain();
+    snapOsc.type = 'sine';
+    snapOsc.frequency.setValueAtTime(620 * jitter, now);
+    snapOsc.frequency.exponentialRampToValueAtTime(270 * jitter, now + 0.075);
+    snapGain.gain.setValueAtTime(0.0001, now);
+    snapGain.gain.linearRampToValueAtTime(0.075, now + 0.004);
+    snapGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.085);
+    snapOsc.connect(snapGain);
+    snapGain.connect(masterGain);
+    snapOsc.onended = () => {
+      safeDisconnect(snapOsc);
+      safeDisconnect(snapGain);
+    };
+    snapOsc.start(now);
+    snapOsc.stop(now + 0.1);
+
+    // Arrow fletching air whoosh
+    const airSrc = ctx.createBufferSource();
+    airSrc.buffer = noiseBurstBuffer;
+    const airFilter = ctx.createBiquadFilter();
+    airFilter.type = 'bandpass';
+    airFilter.Q.value = 1.9;
+    airFilter.frequency.setValueAtTime(1750 * jitter, now + 0.01);
+    airFilter.frequency.exponentialRampToValueAtTime(3400 * jitter, now + 0.055);
+    airFilter.frequency.exponentialRampToValueAtTime(960 * jitter, now + 0.15);
+    const airGain = ctx.createGain();
+    airGain.gain.setValueAtTime(0.0001, now + 0.01);
+    airGain.gain.linearRampToValueAtTime(0.14, now + 0.035);
+    airGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+    airSrc.connect(airFilter);
+    airFilter.connect(airGain);
+    airGain.connect(masterGain);
+    airSrc.onended = () => {
+      safeDisconnect(airSrc);
+      safeDisconnect(airFilter);
+      safeDisconnect(airGain);
+    };
+    airSrc.start(now + 0.01);
+    airSrc.stop(now + 0.18);
+  }
+
+  function playArrowImpact(hitEnemy: boolean): void {
+    if (!ctx || !masterGain || !noiseBurstBuffer || muted || ctx.state !== 'running') {
+      return;
+    }
+    const now = ctx.currentTime;
+    const jitter = 0.94 + Math.random() * 0.12;
+
+    const thwackOsc = ctx.createOscillator();
+    const thwackGain = ctx.createGain();
+    thwackOsc.type = hitEnemy ? 'sine' : 'triangle';
+    thwackOsc.frequency.setValueAtTime((hitEnemy ? 178 : 315) * jitter, now);
+    thwackOsc.frequency.exponentialRampToValueAtTime((hitEnemy ? 56 : 132) * jitter, now + 0.11);
+    thwackGain.gain.setValueAtTime(0.0001, now);
+    thwackGain.gain.linearRampToValueAtTime(hitEnemy ? 0.24 : 0.17, now + 0.005);
+    thwackGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+    thwackOsc.connect(thwackGain);
+    thwackGain.connect(masterGain);
+    thwackOsc.onended = () => {
+      safeDisconnect(thwackOsc);
+      safeDisconnect(thwackGain);
+    };
+    thwackOsc.start(now);
+    thwackOsc.stop(now + 0.14);
+
+    const crackSrc = ctx.createBufferSource();
+    crackSrc.buffer = noiseBurstBuffer;
+    const crackFilter = ctx.createBiquadFilter();
+    crackFilter.type = 'bandpass';
+    crackFilter.frequency.value = (hitEnemy ? 1320 : 2150) * jitter;
+    crackFilter.Q.value = hitEnemy ? 1.3 : 2.1;
+    const crackGain = ctx.createGain();
+    crackGain.gain.setValueAtTime(0.0001, now);
+    crackGain.gain.linearRampToValueAtTime(hitEnemy ? 0.17 : 0.11, now + 0.005);
+    crackGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.085);
+    crackSrc.connect(crackFilter);
+    crackFilter.connect(crackGain);
+    crackGain.connect(masterGain);
+    crackSrc.onended = () => {
+      safeDisconnect(crackSrc);
+      safeDisconnect(crackFilter);
+      safeDisconnect(crackGain);
+    };
+    crackSrc.start(now);
+    crackSrc.stop(now + 0.1);
+  }
+
+  function playRepairHammer(): void {
+    if (!ctx || !masterGain || !noiseBurstBuffer || muted || ctx.state !== 'running') {
+      return;
+    }
+    const now = ctx.currentTime;
+    for (let tap = 0; tap < 2; tap += 1) {
+      const start = now + tap * 0.095;
+      const pitch = tap === 0 ? 1.0 : 1.12;
+
+      // Steel-on-nail metallic ping
+      const pingOsc = ctx.createOscillator();
+      const pingGain = ctx.createGain();
+      pingOsc.type = 'triangle';
+      pingOsc.frequency.setValueAtTime(1480 * pitch, start);
+      pingOsc.frequency.exponentialRampToValueAtTime(890 * pitch, start + 0.065);
+      pingGain.gain.setValueAtTime(0.0001, start);
+      pingGain.gain.linearRampToValueAtTime(0.16, start + 0.004);
+      pingGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.075);
+      pingOsc.connect(pingGain);
+      pingGain.connect(masterGain);
+      pingOsc.onended = () => {
+        safeDisconnect(pingOsc);
+        safeDisconnect(pingGain);
+      };
+      pingOsc.start(start);
+      pingOsc.stop(start + 0.09);
+
+      // Timber knock settle
+      const woodOsc = ctx.createOscillator();
+      const woodGain = ctx.createGain();
+      woodOsc.type = 'sine';
+      woodOsc.frequency.setValueAtTime(160 * pitch, start);
+      woodOsc.frequency.exponentialRampToValueAtTime(66 * pitch, start + 0.07);
+      woodGain.gain.setValueAtTime(0.0001, start);
+      woodGain.gain.linearRampToValueAtTime(0.15, start + 0.006);
+      woodGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.08);
+      woodOsc.connect(woodGain);
+      woodGain.connect(masterGain);
+      woodOsc.onended = () => {
+        safeDisconnect(woodOsc);
+        safeDisconnect(woodGain);
+      };
+      woodOsc.start(start);
+      woodOsc.stop(start + 0.095);
+    }
+  }
+
+  function playStructureBash(destroyed: boolean): void {
+    if (!ctx || !masterGain || !noiseBurstBuffer || muted || ctx.state !== 'running') {
+      return;
+    }
+    const now = ctx.currentTime;
+    const jitter = 0.92 + Math.random() * 0.16;
+
+    // Heavy structural thud
+    const thudOsc = ctx.createOscillator();
+    const thudGain = ctx.createGain();
+    thudOsc.type = 'sine';
+    thudOsc.frequency.setValueAtTime((destroyed ? 92 : 112) * jitter, now);
+    thudOsc.frequency.exponentialRampToValueAtTime(32 * jitter, now + (destroyed ? 0.34 : 0.19));
+    thudGain.gain.setValueAtTime(0.0001, now);
+    thudGain.gain.linearRampToValueAtTime(destroyed ? 0.3 : 0.23, now + 0.01);
+    thudGain.gain.exponentialRampToValueAtTime(0.0001, now + (destroyed ? 0.38 : 0.21));
+    thudOsc.connect(thudGain);
+    thudGain.connect(masterGain);
+    thudOsc.onended = () => {
+      safeDisconnect(thudOsc);
+      safeDisconnect(thudGain);
+    };
+    thudOsc.start(now);
+    thudOsc.stop(now + (destroyed ? 0.42 : 0.24));
+
+    // Splintering crack burst
+    const bursts = destroyed ? 3 : 1;
+    for (let b = 0; b < bursts; b += 1) {
+      const start = now + b * 0.075;
+      const dur = destroyed ? 0.24 : 0.18;
+      const crackSrc = ctx.createBufferSource();
+      crackSrc.buffer = noiseBurstBuffer;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime((1240 - b * 240) * jitter, start);
+      bp.frequency.exponentialRampToValueAtTime(480 * jitter, start + dur);
+      bp.Q.value = 1.25;
+      const cGain = ctx.createGain();
+      cGain.gain.setValueAtTime(0.0001, start);
+      cGain.gain.linearRampToValueAtTime(destroyed ? 0.22 - b * 0.035 : 0.18, start + 0.01);
+      cGain.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+      crackSrc.connect(bp);
+      bp.connect(cGain);
+      cGain.connect(masterGain);
+      crackSrc.onended = () => {
+        safeDisconnect(crackSrc);
+        safeDisconnect(bp);
+        safeDisconnect(cGain);
+      };
+      crackSrc.start(start);
+      crackSrc.stop(start + dur + 0.03);
+    }
+  }
+
+  function playSiegeHorn(repelled: boolean): void {
+    if (!ctx || !masterGain || muted || ctx.state !== 'running') {
+      return;
+    }
+    const now = ctx.currentTime;
+
+    if (!repelled) {
+      // Ominous low dual-detuned frontier war horn
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.Q.value = 2.1;
+      filter.frequency.setValueAtTime(240, now);
+      filter.frequency.exponentialRampToValueAtTime(520, now + 0.35);
+      filter.frequency.exponentialRampToValueAtTime(195, now + 1.35);
+
+      const hornGain = ctx.createGain();
+      hornGain.gain.setValueAtTime(0.0001, now);
+      hornGain.gain.linearRampToValueAtTime(0.22, now + 0.24);
+      hornGain.gain.exponentialRampToValueAtTime(0.0001, now + 1.38);
+
+      const oscA = ctx.createOscillator();
+      oscA.type = 'sawtooth';
+      oscA.frequency.setValueAtTime(82.4, now);
+      oscA.frequency.exponentialRampToValueAtTime(77.8, now + 1.35);
+
+      const oscB = ctx.createOscillator();
+      oscB.type = 'sawtooth';
+      oscB.frequency.setValueAtTime(83.25, now);
+      oscB.frequency.exponentialRampToValueAtTime(78.4, now + 1.35);
+
+      oscA.connect(filter);
+      oscB.connect(filter);
+      filter.connect(hornGain);
+      hornGain.connect(masterGain);
+
+      oscA.onended = () => {
+        safeDisconnect(oscA);
+      };
+      oscB.onended = () => {
+        safeDisconnect(oscB);
+        safeDisconnect(filter);
+        safeDisconnect(hornGain);
+      };
+      oscA.start(now);
+      oscB.start(now);
+      oscA.stop(now + 1.42);
+      oscB.stop(now + 1.42);
+      return;
+    }
+
+    // Warm resolved triad chime when siege wave is repelled
+    const notes = [293.66, 369.99, 440.0];
+    for (let i = 0; i < notes.length; i += 1) {
+      const freq = notes[i];
+      if (!freq) {
+        continue;
+      }
+      const start = now + i * 0.085;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, start);
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.linearRampToValueAtTime(0.11, start + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.78);
+      osc.connect(gain);
+      gain.connect(masterGain);
+      osc.onended = () => {
+        safeDisconnect(osc);
+        safeDisconnect(gain);
+      };
+      osc.start(start);
+      osc.stop(start + 0.82);
+    }
+  }
+
   return {
     unlock,
     isMuted(): boolean {
@@ -2073,6 +2369,11 @@ export function createFrontierAudio(): FrontierAudio {
     playDismantle,
     playDoorToggle,
     playSpikeHit,
+    playBowShoot,
+    playArrowImpact,
+    playRepairHammer,
+    playStructureBash,
+    playSiegeHorn,
     update(elapsed: number, dt: number, spatial?: SpatialAudioState): void {
       if (!ctx || ctx.state !== 'running' || muted) {
         return;

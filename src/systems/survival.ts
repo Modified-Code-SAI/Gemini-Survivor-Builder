@@ -6,6 +6,7 @@ export interface LootBundle {
   readonly scrap?: number;
   readonly wood?: number;
   readonly stone?: number;
+  readonly arrows?: number;
 }
 
 export interface ResourceCost {
@@ -14,14 +15,38 @@ export interface ResourceCost {
   readonly scrap?: number;
 }
 
-export type CraftItemKind = 'ration' | 'medkit' | 'warmer' | 'bottle';
+export type CraftItemKind =
+  | 'ration'
+  | 'medkit'
+  | 'warmer'
+  | 'bottle'
+  | 'arrows'
+  | 'repair_hammer'
+  | 'compound_bow'
+  | 'reinforced_tools'
+  | 'upgraded_flashlight'
+  | 'scrap_armor';
 
 export const WORKBENCH_RECIPES: Readonly<Record<CraftItemKind, ResourceCost>> = {
   ration: { wood: 1, scrap: 1 },
   medkit: { wood: 1, scrap: 2 },
   warmer: { stone: 1, scrap: 1 },
   bottle: { stone: 1 },
+  arrows: { wood: 1, stone: 1 },
+  repair_hammer: { wood: 2, stone: 1, scrap: 1 },
+  compound_bow: { wood: 4, stone: 2, scrap: 3 },
+  reinforced_tools: { wood: 2, stone: 3, scrap: 3 },
+  upgraded_flashlight: { wood: 1, stone: 2, scrap: 3 },
+  scrap_armor: { wood: 2, stone: 2, scrap: 4 },
 };
+
+export interface SurvivalGear {
+  hasCompoundBow: boolean;
+  hasRepairHammer: boolean;
+  reinforcedTools: boolean;
+  upgradedFlashlight: boolean;
+  scrapArmor: boolean;
+}
 
 export interface SurvivalVitals {
   health: number;
@@ -41,6 +66,18 @@ export interface SurvivalInventory {
   scrap: number;
   wood: number;
   stone: number;
+  arrows: number;
+}
+
+export interface SurvivalSnapshotInventory {
+  readonly rations: number;
+  readonly medkits: number;
+  readonly warmers: number;
+  readonly bottles: number;
+  readonly scrap: number;
+  readonly wood: number;
+  readonly stone: number;
+  readonly arrows?: number;
 }
 
 export interface SurvivalSnapshot {
@@ -50,7 +87,8 @@ export interface SurvivalSnapshot {
     readonly hunger: number;
     readonly warmth: number;
   };
-  readonly inventory: Readonly<SurvivalInventory>;
+  readonly inventory: SurvivalSnapshotInventory;
+  readonly gear?: Readonly<SurvivalGear>;
 }
 
 export interface SurvivalUpdateInput {
@@ -66,24 +104,27 @@ export interface SurvivalUpdateInput {
 export interface SurvivalState {
   readonly vitals: Readonly<SurvivalVitals>;
   readonly inventory: Readonly<SurvivalInventory>;
+  readonly gear: Readonly<SurvivalGear>;
   update(dt: number, input: SurvivalUpdateInput): void;
   canSprint(): boolean;
   canJump(): boolean;
   consumeJumpStamina(): boolean;
   canAttack(): boolean;
   consumeAttackStamina(): boolean;
-  applyDamage(amount: number): number;
+  applyDamage(amount: number, source?: 'combat' | 'exposure'): number;
   addLoot(bundle: LootBundle): void;
   takeInventory(bundle: LootBundle): boolean;
   hasResources(cost: ResourceCost): boolean;
   spendResources(cost: ResourceCost): boolean;
   spendScrap(amount: number): boolean;
   craftFieldRation(): boolean;
+  isRecipeOwned(kind: CraftItemKind): boolean;
   craftItem(kind: CraftItemKind): boolean;
   useRation(): boolean;
   useMedkit(): boolean;
   useWarmer(): boolean;
   consumeBottle(): boolean;
+  consumeArrow(): boolean;
   reviveAtCamp(): void;
   serialize(): SurvivalSnapshot;
   hydrate(snapshot: SurvivalSnapshot): void;
@@ -113,6 +154,7 @@ const WARMTH_FIRE_REGEN = 7.5;
 const FIRE_HEALTH_REGEN = 1.8;
 
 const EXPOSURE_HEALTH_DRAIN = 2.5;
+const SCRAP_ARMOR_COMBAT_DAMAGE_SCALE = 0.62;
 
 function clampVital(value: number): number {
   return value < 0 ? 0 : value > MAX_VITAL ? MAX_VITAL : value;
@@ -126,7 +168,8 @@ function sanitizeCount(value: number | undefined): number {
 }
 
 /**
- * Deterministic player survival vitals, exhaustion hysteresis, and scavenging inventory manager.
+ * Deterministic player survival vitals, exhaustion hysteresis, workbench gear unlocks,
+ * and scavenging inventory manager.
  * Starts completely empty-handed so the survivor must sneak past threats and scavenge the valley.
  */
 export function createSurvivalState(): SurvivalState {
@@ -148,6 +191,15 @@ export function createSurvivalState(): SurvivalState {
     scrap: 0,
     wood: 0,
     stone: 0,
+    arrows: 0,
+  };
+
+  const gear: SurvivalGear = {
+    hasCompoundBow: false,
+    hasRepairHammer: false,
+    reinforcedTools: false,
+    upgradedFlashlight: false,
+    scrapArmor: false,
   };
 
   function syncExhaustionState(): void {
@@ -158,12 +210,14 @@ export function createSurvivalState(): SurvivalState {
     }
   }
 
-  function applyDamage(amount: number): number {
+  function applyDamage(amount: number, source: 'combat' | 'exposure' = 'combat'): number {
     if (vitals.isDead || !Number.isFinite(amount) || amount <= 0) {
       return 0;
     }
+    const effectiveAmount =
+      gear.scrapArmor && source !== 'exposure' ? amount * SCRAP_ARMOR_COMBAT_DAMAGE_SCALE : amount;
     const prev = vitals.health;
-    vitals.health = clampVital(vitals.health - amount);
+    vitals.health = clampVital(vitals.health - effectiveAmount);
     if (vitals.health <= 0) {
       vitals.health = 0;
       vitals.isDead = true;
@@ -210,9 +264,9 @@ export function createSurvivalState(): SurvivalState {
       vitals.warmth = clampVital(vitals.warmth - totalDrain * dt);
     }
 
-    // 4. Exposure / starvation health tick
+    // 4. Exposure / starvation health tick (unmitigated by scrap armor)
     if (vitals.hunger <= 0 || vitals.warmth <= 0) {
-      applyDamage(EXPOSURE_HEALTH_DRAIN * dt);
+      applyDamage(EXPOSURE_HEALTH_DRAIN * dt, 'exposure');
     }
   }
 
@@ -254,6 +308,7 @@ export function createSurvivalState(): SurvivalState {
     inventory.scrap += sanitizeCount(bundle.scrap);
     inventory.wood += sanitizeCount(bundle.wood);
     inventory.stone += sanitizeCount(bundle.stone);
+    inventory.arrows += sanitizeCount(bundle.arrows);
   }
 
   function takeInventory(bundle: LootBundle): boolean {
@@ -267,7 +322,8 @@ export function createSurvivalState(): SurvivalState {
     const sc = sanitizeCount(bundle.scrap);
     const wd = sanitizeCount(bundle.wood);
     const st = sanitizeCount(bundle.stone);
-    if (r + m + wrm + b + sc + wd + st === 0) {
+    const ar = sanitizeCount(bundle.arrows);
+    if (r + m + wrm + b + sc + wd + st + ar === 0) {
       return false;
     }
     if (
@@ -277,7 +333,8 @@ export function createSurvivalState(): SurvivalState {
       inventory.bottles < b ||
       inventory.scrap < sc ||
       inventory.wood < wd ||
-      inventory.stone < st
+      inventory.stone < st ||
+      inventory.arrows < ar
     ) {
       return false;
     }
@@ -288,6 +345,7 @@ export function createSurvivalState(): SurvivalState {
     inventory.scrap -= sc;
     inventory.wood -= wd;
     inventory.stone -= st;
+    inventory.arrows -= ar;
     return true;
   }
 
@@ -372,7 +430,35 @@ export function createSurvivalState(): SurvivalState {
     return true;
   }
 
+  function isRecipeOwned(kind: CraftItemKind): boolean {
+    switch (kind) {
+      case 'repair_hammer':
+        return gear.hasRepairHammer;
+      case 'compound_bow':
+        return gear.hasCompoundBow;
+      case 'reinforced_tools':
+        return gear.reinforcedTools;
+      case 'upgraded_flashlight':
+        return gear.upgradedFlashlight;
+      case 'scrap_armor':
+        return gear.scrapArmor;
+      case 'ration':
+      case 'medkit':
+      case 'warmer':
+      case 'bottle':
+      case 'arrows':
+        return false;
+      default: {
+        const exhaustiveCheck: never = kind;
+        return exhaustiveCheck;
+      }
+    }
+  }
+
   function craftItem(kind: CraftItemKind): boolean {
+    if (isRecipeOwned(kind)) {
+      return false;
+    }
     const recipe = WORKBENCH_RECIPES[kind];
     if (!spendResources(recipe)) {
       return false;
@@ -390,6 +476,25 @@ export function createSurvivalState(): SurvivalState {
       case 'bottle':
         inventory.bottles += 1;
         break;
+      case 'arrows':
+        inventory.arrows += 4;
+        break;
+      case 'repair_hammer':
+        gear.hasRepairHammer = true;
+        break;
+      case 'compound_bow':
+        gear.hasCompoundBow = true;
+        inventory.arrows += 6;
+        break;
+      case 'reinforced_tools':
+        gear.reinforcedTools = true;
+        break;
+      case 'upgraded_flashlight':
+        gear.upgradedFlashlight = true;
+        break;
+      case 'scrap_armor':
+        gear.scrapArmor = true;
+        break;
       default: {
         const exhaustiveCheck: never = kind;
         return exhaustiveCheck;
@@ -403,6 +508,14 @@ export function createSurvivalState(): SurvivalState {
       return false;
     }
     inventory.bottles -= 1;
+    return true;
+  }
+
+  function consumeArrow(): boolean {
+    if (vitals.isDead || inventory.arrows <= 0) {
+      return false;
+    }
+    inventory.arrows -= 1;
     return true;
   }
 
@@ -439,6 +552,14 @@ export function createSurvivalState(): SurvivalState {
         scrap: inventory.scrap,
         wood: inventory.wood,
         stone: inventory.stone,
+        arrows: inventory.arrows,
+      },
+      gear: {
+        hasCompoundBow: gear.hasCompoundBow,
+        hasRepairHammer: gear.hasRepairHammer,
+        reinforcedTools: gear.reinforcedTools,
+        upgradedFlashlight: gear.upgradedFlashlight,
+        scrapArmor: gear.scrapArmor,
       },
     };
   }
@@ -459,6 +580,13 @@ export function createSurvivalState(): SurvivalState {
     inventory.scrap = sanitizeCount(snapshot.inventory.scrap);
     inventory.wood = sanitizeCount(snapshot.inventory.wood);
     inventory.stone = sanitizeCount(snapshot.inventory.stone);
+    inventory.arrows = sanitizeCount(snapshot.inventory.arrows);
+
+    gear.hasCompoundBow = snapshot.gear?.hasCompoundBow === true;
+    gear.hasRepairHammer = snapshot.gear?.hasRepairHammer === true;
+    gear.reinforcedTools = snapshot.gear?.reinforcedTools === true;
+    gear.upgradedFlashlight = snapshot.gear?.upgradedFlashlight === true;
+    gear.scrapArmor = snapshot.gear?.scrapArmor === true;
   }
 
   function reset(): void {
@@ -477,11 +605,19 @@ export function createSurvivalState(): SurvivalState {
     inventory.scrap = 0;
     inventory.wood = 0;
     inventory.stone = 0;
+    inventory.arrows = 0;
+
+    gear.hasCompoundBow = false;
+    gear.hasRepairHammer = false;
+    gear.reinforcedTools = false;
+    gear.upgradedFlashlight = false;
+    gear.scrapArmor = false;
   }
 
   return {
     vitals,
     inventory,
+    gear,
     update,
     canSprint,
     canJump,
@@ -495,11 +631,13 @@ export function createSurvivalState(): SurvivalState {
     spendResources,
     spendScrap,
     craftFieldRation,
+    isRecipeOwned,
     craftItem,
     useRation,
     useMedkit,
     useWarmer,
     consumeBottle,
+    consumeArrow,
     reviveAtCamp,
     serialize,
     hydrate,

@@ -39,6 +39,7 @@ export interface ChoppableForestController {
     dirX: number,
     dirZ: number,
     liveObstacles: Obstacle[],
+    hitPower?: number,
   ): {
     readonly hit: boolean;
     readonly depleted: boolean;
@@ -4451,6 +4452,7 @@ export function createFrontierEnvironment(
       dirX: number,
       dirZ: number,
       liveObstacles: Obstacle[],
+      hitPower = 1,
     ): {
       readonly hit: boolean;
       readonly depleted: boolean;
@@ -4467,10 +4469,12 @@ export function createFrontierEnvironment(
       const nz = len > 1e-4 ? dirZ / len : -1;
       const hitY = tree.terrainY + 1.15;
 
-      tree.hitsRemaining = Math.max(0, tree.hitsRemaining - 1);
+      const step = Math.max(1, Math.floor(hitPower));
+      const prevHits = tree.hitsRemaining;
+      tree.hitsRemaining = Math.max(0, prevHits - step);
       if (tree.hitsRemaining > 0) {
         triggerTreeShake(tree, nx, nz, 0.28);
-        return { hit: true, depleted: false, woodYield: 2, hitY };
+        return { hit: true, depleted: false, woodYield: step * 2, hitY };
       }
 
       tree.depleted = true;
@@ -4488,7 +4492,9 @@ export function createFrontierEnvironment(
       rebuildStumpInstances();
       activateFallingTree(tree, nx, nz);
 
-      return { hit: true, depleted: true, woodYield: 6, hitY };
+      const woodAwardedSoFar = Math.max(0, 3 - prevHits) * 2;
+      const finalWood = Math.max(6, 10 - woodAwardedSoFar);
+      return { hit: true, depleted: true, woodYield: finalWood, hitY };
     },
     getRemainingCount(): number {
       return remainingTreeCount;

@@ -87,20 +87,23 @@ function createForestHarness(obstacles: Obstacle[]): {
       }
       shakeCounts.set(id, (shakeCounts.get(id) ?? 0) + 1);
     },
-    chopTree(id: string, _dirX: number, _dirZ: number, liveObstacles: Obstacle[]) {
+    chopTree(id: string, _dirX: number, _dirZ: number, liveObstacles: Obstacle[], hitPower = 1) {
       const tree = treeMap.get(id);
       if (!tree || tree.depleted) {
         return { hit: false, depleted: false, woodYield: 0, hitY: 0 };
       }
-      tree.hitsRemaining = Math.max(0, tree.hitsRemaining - 1);
+      const step = Math.max(1, Math.floor(hitPower));
+      const prevHits = tree.hitsRemaining;
+      tree.hitsRemaining = Math.max(0, prevHits - step);
       const hitY = tree.terrainY + 1.15;
       if (tree.hitsRemaining > 0) {
         shakeCounts.set(id, (shakeCounts.get(id) ?? 0) + 1);
-        return { hit: true, depleted: false, woodYield: 2, hitY };
+        return { hit: true, depleted: false, woodYield: step * 2, hitY };
       }
       tree.depleted = true;
       swapObs(liveObstacles, tree.standingObstacle, tree.stumpObstacle);
-      return { hit: true, depleted: true, woodYield: 6, hitY };
+      const woodAwardedSoFar = Math.max(0, 3 - prevHits) * 2;
+      return { hit: true, depleted: true, woodYield: Math.max(6, 10 - woodAwardedSoFar), hitY };
     },
     getRemainingCount(): number {
       return trees.filter((t) => !t.depleted).length;
@@ -312,5 +315,45 @@ describe('harvestable forest timber & stone outcrop system', () => {
     harvest.dispose();
     // 3 forest tree obstacles remain owned by environment; all 10 rock obstacles removed cleanly
     expect(obstacles.length).toBe(3);
+  });
+
+  it('harvests trees and rock outcrops in 2 swings when reinforced tools are unlocked while preserving full yield', () => {
+    const obstacles: Obstacle[] = [];
+    const harness = createForestHarness(obstacles);
+    const harvest = createHarvestSystem({ obstacles, forest: harness.controller });
+
+    const tree = harness.trees[0];
+    const rock = HARVEST_ROCK_SPECS[1];
+    expect(tree).toBeDefined();
+    expect(rock).toBeDefined();
+    if (!tree || !rock) {
+      return;
+    }
+
+    // Reinforced Axe fells tree in 2 chops: +4 Wood, then +6 Wood = 10 Wood total
+    const rChop1 = harvest.tryHarvestHit(tree.x, tree.z + 1.5, 0, -1, 'axe', true);
+    expect(rChop1.hit).toBe(true);
+    expect(rChop1.depleted).toBe(false);
+    expect(rChop1.loot).toEqual({ wood: 4 });
+
+    const rChop2 = harvest.tryHarvestHit(tree.x, tree.z + 1.5, 0, -1, 'axe', true);
+    expect(rChop2.hit).toBe(true);
+    expect(rChop2.depleted).toBe(true);
+    expect(rChop2.loot).toEqual({ wood: 6 });
+    expect((rChop1.loot?.wood ?? 0) + (rChop2.loot?.wood ?? 0)).toBe(10);
+
+    // Reinforced Pickaxe shatters rock in 2 strikes: +4 Stone, then +5 Stone + 1 Scrap = 9 Stone + 1 Scrap total
+    const rMine1 = harvest.tryHarvestHit(rock.x, rock.z + 1.6, 0, -1, 'pickaxe', true);
+    expect(rMine1.hit).toBe(true);
+    expect(rMine1.depleted).toBe(false);
+    expect(rMine1.loot).toEqual({ stone: 4 });
+
+    const rMine2 = harvest.tryHarvestHit(rock.x, rock.z + 1.6, 0, -1, 'pickaxe', true);
+    expect(rMine2.hit).toBe(true);
+    expect(rMine2.depleted).toBe(true);
+    expect(rMine2.loot).toEqual({ stone: 5, scrap: 1 });
+    expect((rMine1.loot?.stone ?? 0) + (rMine2.loot?.stone ?? 0)).toBe(9);
+
+    harvest.dispose();
   });
 });

@@ -4,7 +4,7 @@ import { getTerrainHeight, type Obstacle } from '../world/terrain';
 import { getWorldTextureAtlas } from '../world/textures';
 import type { LootBundle } from './survival';
 
-export type EquippedTool = 'axe' | 'pickaxe' | 'fists';
+export type EquippedTool = 'axe' | 'pickaxe' | 'fists' | 'bow' | 'hammer';
 export type HarvestNodeKind = 'tree' | 'rock';
 
 export interface HarvestNodeSpec {
@@ -40,6 +40,7 @@ export interface HarvestSystem {
     fwdX: number,
     fwdZ: number,
     tool: EquippedTool,
+    reinforced?: boolean,
   ): HarvestHitResult;
   getCounts(): {
     readonly remainingTrees: number;
@@ -312,10 +313,12 @@ export function createHarvestSystem(options: HarvestSystemOptions): HarvestSyste
     fwdX: number,
     fwdZ: number,
     tool: EquippedTool,
+    reinforced = false,
   ): HarvestHitResult {
     const fLen = Math.hypot(fwdX, fwdZ) || 1;
     const nx = fwdX / fLen;
     const nz = fwdZ / fLen;
+    const hitPower = reinforced ? 2 : 1;
 
     let bestRock: RockNodeRuntime | null = null;
     let bestForestTree: ChoppableTreeTarget | null = null;
@@ -391,7 +394,7 @@ export function createHarvestSystem(options: HarvestSystemOptions): HarvestSyste
         };
       }
 
-      const chopRes = forest.chopTree(bestForestTree.id, dirX, dirZ, obstacles);
+      const chopRes = forest.chopTree(bestForestTree.id, dirX, dirZ, obstacles, hitPower);
       if (!chopRes.hit) {
         return {
           hit: false,
@@ -443,7 +446,8 @@ export function createHarvestSystem(options: HarvestSystemOptions): HarvestSyste
       };
     }
 
-    bestRock.hitsRemaining = Math.max(0, bestRock.hitsRemaining - 1);
+    const prevRockHits = bestRock.hitsRemaining;
+    bestRock.hitsRemaining = Math.max(0, prevRockHits - hitPower);
     bestRock.shakeTimer = 0.28;
     bestRock.shakeDirX = awayX / awayLen;
     bestRock.shakeDirZ = awayZ / awayLen;
@@ -458,22 +462,24 @@ export function createHarvestSystem(options: HarvestSystemOptions): HarvestSyste
         wrongTool: false,
         kind: 'rock',
         depleted: false,
-        loot: { stone: 2 },
+        loot: { stone: hitPower * 2 },
         hitX: bestRock.spec.x,
         hitZ: bestRock.spec.z,
       };
     }
 
-    // Final strike: shatter mossy stone outcrop cleanly
+    // Final strike: shatter mossy stone outcrop cleanly (total 9 Stone + 1 Scrap regardless of hitPower)
     bestRock.depleted = true;
     bestRock.mainPivot.visible = false;
     setNodeObstacle(bestRock, null);
+    const stoneAwardedSoFar = Math.max(0, MAX_HITS_PER_NODE - prevRockHits) * 2;
+    const finalStone = Math.max(5, 9 - stoneAwardedSoFar);
     return {
       hit: true,
       wrongTool: false,
       kind: 'rock',
       depleted: true,
-      loot: { stone: 5, scrap: 1 },
+      loot: { stone: finalStone, scrap: 1 },
       hitX: bestRock.spec.x,
       hitZ: bestRock.spec.z,
     };

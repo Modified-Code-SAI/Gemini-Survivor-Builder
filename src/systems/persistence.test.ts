@@ -45,11 +45,22 @@ describe('world persistence system', () => {
           scrap: 5,
           wood: 14,
           stone: 9,
+          arrows: 8,
+        },
+        gear: {
+          hasCompoundBow: true,
+          hasRepairHammer: true,
+          reinforcedTools: false,
+          upgradedFlashlight: true,
+          scrapArmor: false,
         },
       },
       builtPieces: [
         { id: 'bp_1', kind: 'foundation', x: -12, y: 0.3, z: 4, yaw: 0 },
-        { id: 'bp_2', kind: 'doorway', x: -12, y: 0.54, z: 5.5, yaw: Math.PI, doorOpen: true },
+        { id: 'bp_2', kind: 'doorway', x: -12, y: 0.54, z: 5.5, yaw: Math.PI, doorOpen: true, hp: 92 },
+        { id: 'bp_3', kind: 'stairs', x: -12, y: 0.54, z: 4, yaw: 0 },
+        { id: 'bp_4', kind: 'upper_floor', x: -12, y: 3.34, z: 1, yaw: 0 },
+        { id: 'bp_5', kind: 'window_wall', x: -12, y: 3.58, z: -0.5, yaw: 0, hp: 74 },
       ],
       storageStash: {
         wood: 6,
@@ -74,16 +85,64 @@ describe('world persistence system', () => {
     const loaded = loadWorldFromStorage(store);
     expect(loaded).toEqual(sample);
 
-    // Verify >64 (80) depletedHarvestIds round-trip cleanly for full-forest timber chopping
+    // Verify >64 (80) depletedHarvestIds and >64 (72) builtPieces round-trip cleanly
     const manyDepletedIds = Array.from({ length: 80 }, (_, idx) => `forest_tree_${idx}`);
-    const forestSample: WorldSaveData = {
+    const manyBuiltPieces = Array.from({ length: 72 }, (_, idx) => ({
+      id: `bp_${idx + 1}`,
+      kind: 'foundation' as const,
+      x: -20 + (idx % 9) * 3,
+      y: 0.3,
+      z: -10 + Math.floor(idx / 9) * 3,
+      yaw: 0,
+    }));
+    const expandedSample: WorldSaveData = {
       ...sample,
+      builtPieces: manyBuiltPieces,
       depletedHarvestIds: manyDepletedIds,
     };
-    expect(saveWorldToStorage(forestSample, store)).toBe(true);
-    const loadedForest = loadWorldFromStorage(store);
-    expect(loadedForest?.depletedHarvestIds).toEqual(manyDepletedIds);
-    expect(loadedForest?.depletedHarvestIds.length).toBe(80);
+    expect(saveWorldToStorage(expandedSample, store)).toBe(true);
+    const loadedExpanded = loadWorldFromStorage(store);
+    expect(loadedExpanded?.depletedHarvestIds).toEqual(manyDepletedIds);
+    expect(loadedExpanded?.depletedHarvestIds.length).toBe(80);
+    expect(loadedExpanded?.builtPieces.length).toBe(72);
+
+    // Verify legacy Phase 1 JSON save (missing arrows & gear) hydrates with safe 0 / false defaults
+    store.setItem(
+      SAVE_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        savedAt: 1730000000000,
+        player: { x: -4, z: 10, yaw: 0.2 },
+        timeHours: 14.25,
+        survival: {
+          vitals: { health: 95, stamina: 100, hunger: 88, warmth: 92 },
+          inventory: {
+            rations: 1,
+            medkits: 0,
+            warmers: 1,
+            bottles: 2,
+            scrap: 3,
+            wood: 10,
+            stone: 4,
+          },
+        },
+        builtPieces: [{ id: 'bp_1', kind: 'foundation', x: -6, y: 0.2, z: 8, yaw: 0 }],
+        storageStash: { wood: 0, stone: 0, scrap: 0, rations: 0, medkits: 0, warmers: 0, bottles: 0 },
+        camp: { campfires: [], shelters: [] },
+        lootedCacheIds: ['overlook_pack'],
+        depletedHarvestIds: ['forest_tree_0'],
+      }),
+    );
+    const loadedLegacy = loadWorldFromStorage(store);
+    expect(loadedLegacy).not.toBeNull();
+    expect(loadedLegacy?.survival.inventory.arrows).toBe(0);
+    expect(loadedLegacy?.survival.gear).toEqual({
+      hasCompoundBow: false,
+      hasRepairHammer: false,
+      reinforcedTools: false,
+      upgradedFlashlight: false,
+      scrapArmor: false,
+    });
 
     clearWorldSave(store);
     expect(hasSavedWorld(store)).toBe(false);

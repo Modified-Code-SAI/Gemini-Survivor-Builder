@@ -58,8 +58,11 @@ function isBuildPieceKind(value: unknown): value is BuildPieceKind {
   return (
     value === 'foundation' ||
     value === 'wall' ||
+    value === 'window_wall' ||
     value === 'doorway' ||
     value === 'roof' ||
+    value === 'stairs' ||
+    value === 'upper_floor' ||
     value === 'spikes' ||
     value === 'storage' ||
     value === 'workbench'
@@ -120,7 +123,7 @@ function parseWorldSaveData(raw: unknown): WorldSaveData | null {
     return null;
   }
   const builtPieces: SavedBuildPiece[] = [];
-  for (let i = 0; i < rawPieces.length && builtPieces.length < 64; i += 1) {
+  for (let i = 0; i < rawPieces.length && builtPieces.length < 96; i += 1) {
     const p: unknown = rawPieces[i];
     if (!isRecord(p) || !isBuildPieceKind(p['kind'])) {
       continue;
@@ -133,10 +136,12 @@ function parseWorldSaveData(raw: unknown): WorldSaveData | null {
     if (x === null || y === null || z === null || yaw === null) {
       continue;
     }
+    const rawHp = readFiniteNumber(p['hp']);
+    const hpField = rawHp !== null && rawHp > 0 ? { hp: rawHp } : {};
     builtPieces.push(
       p['kind'] === 'doorway'
-        ? { id, kind: p['kind'], x, y, z, yaw, doorOpen: p['doorOpen'] === true }
-        : { id, kind: p['kind'], x, y, z, yaw },
+        ? { id, kind: p['kind'], x, y, z, yaw, doorOpen: p['doorOpen'] === true, ...hpField }
+        : { id, kind: p['kind'], x, y, z, yaw, ...hpField },
     );
   }
 
@@ -190,6 +195,23 @@ function parseWorldSaveData(raw: unknown): WorldSaveData | null {
     return null;
   }
 
+  const gearRec = survivalRec['gear'];
+  const gear = isRecord(gearRec)
+    ? {
+        hasCompoundBow: gearRec['hasCompoundBow'] === true,
+        hasRepairHammer: gearRec['hasRepairHammer'] === true,
+        reinforcedTools: gearRec['reinforcedTools'] === true,
+        upgradedFlashlight: gearRec['upgradedFlashlight'] === true,
+        scrapArmor: gearRec['scrapArmor'] === true,
+      }
+    : {
+        hasCompoundBow: false,
+        hasRepairHammer: false,
+        reinforcedTools: false,
+        upgradedFlashlight: false,
+        scrapArmor: false,
+      };
+
   return {
     version: 1,
     savedAt,
@@ -209,7 +231,9 @@ function parseWorldSaveData(raw: unknown): WorldSaveData | null {
         scrap: readNonNegInt(invRec['scrap']),
         wood: readNonNegInt(invRec['wood']),
         stone: readNonNegInt(invRec['stone']),
+        arrows: readNonNegInt(invRec['arrows']),
       },
+      gear,
     },
     builtPieces,
     storageStash,

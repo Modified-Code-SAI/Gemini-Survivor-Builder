@@ -1,17 +1,24 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import {
+  BOW_AIM_QUATERNION,
+  BOW_CARRY_QUATERNION,
+  BOW_GRIP_OFFSET,
   HAND_TOOL_GRIP_OFFSET,
   HAND_TOOL_GRIP_QUATERNION,
   resolveAttackClipKind,
 } from './controller';
 
-describe('player controller tool-aware combat & hand_R grip math', () => {
-  it('routes axe and pickaxe attacks strictly to dedicated tool swings and alternates punches only for bare fists', () => {
+describe('player controller tool-aware combat & hand_R/hand_L grip math', () => {
+  it('routes axe, pickaxe, hammer, and bow attacks strictly to dedicated clips and alternates punches only for bare fists', () => {
     expect(resolveAttackClipKind('axe', false)).toBe('axe');
     expect(resolveAttackClipKind('axe', true)).toBe('axe');
     expect(resolveAttackClipKind('pickaxe', false)).toBe('pickaxe');
     expect(resolveAttackClipKind('pickaxe', true)).toBe('pickaxe');
+    expect(resolveAttackClipKind('hammer', false)).toBe('hammer');
+    expect(resolveAttackClipKind('hammer', true)).toBe('hammer');
+    expect(resolveAttackClipKind('bow', false)).toBe('bow');
+    expect(resolveAttackClipKind('bow', true)).toBe('bow');
     expect(resolveAttackClipKind('fists', false)).toBe('fists_right');
     expect(resolveAttackClipKind('fists', true)).toBe('fists_left');
   });
@@ -46,5 +53,40 @@ describe('player controller tool-aware combat & hand_R grip math', () => {
     // Shaft (+Y) stands upright (+Z > 0.65) and blade edge (-Z) faces forward (-Y < -0.45, never backwards)
     expect(worldShaft.z).toBeGreaterThan(0.65);
     expect(worldBlade.y).toBeLessThan(-0.45);
+  });
+
+  it('calibrates unit-length hand_L compound bow carry and aim quaternions with a smooth slerp arc', () => {
+    expect(BOW_GRIP_OFFSET.x).toBe(0);
+    expect(BOW_GRIP_OFFSET.y).toBeGreaterThan(0.03);
+    expect(BOW_GRIP_OFFSET.y).toBeLessThan(0.08);
+    expect(BOW_GRIP_OFFSET.z).toBe(0);
+
+    const carryLen = Math.hypot(
+      BOW_CARRY_QUATERNION.x,
+      BOW_CARRY_QUATERNION.y,
+      BOW_CARRY_QUATERNION.z,
+      BOW_CARRY_QUATERNION.w,
+    );
+    const aimLen = Math.hypot(
+      BOW_AIM_QUATERNION.x,
+      BOW_AIM_QUATERNION.y,
+      BOW_AIM_QUATERNION.z,
+      BOW_AIM_QUATERNION.w,
+    );
+    expect(Math.abs(carryLen - 1)).toBeLessThan(1e-4);
+    expect(Math.abs(aimLen - 1)).toBeLessThan(1e-4);
+
+    const dot = Math.min(
+      1,
+      Math.abs(
+        BOW_CARRY_QUATERNION.x * BOW_AIM_QUATERNION.x +
+          BOW_CARRY_QUATERNION.y * BOW_AIM_QUATERNION.y +
+          BOW_CARRY_QUATERNION.z * BOW_AIM_QUATERNION.z +
+          BOW_CARRY_QUATERNION.w * BOW_AIM_QUATERNION.w,
+      ),
+    );
+    const deltaDeg = (2 * Math.acos(dot) * 180) / Math.PI;
+    expect(deltaDeg).toBeGreaterThan(30);
+    expect(deltaDeg).toBeLessThan(65);
   });
 });

@@ -152,6 +152,7 @@ describe('survival state system', () => {
       scrap: 3,
       wood: 0,
       stone: 0,
+      arrows: 0,
     });
 
     // Lower vitals so item gains are directly observable
@@ -339,5 +340,120 @@ describe('survival state system', () => {
     expect(restored.inventory.warmers).toBe(0);
     expect(restored.inventory.wood).toBe(7);
     expect(restored.inventory.stone).toBe(5);
+  });
+
+  it('crafts Phase 2 workbench gear & arrows, prevents double-crafting, mitigates combat damage with scrap armor, and hydrates legacy saves safely', () => {
+    const survival = createSurvivalState();
+    survival.addLoot({ wood: 20, stone: 20, scrap: 20 });
+
+    // Arrows (+4) and consumeArrow
+    expect(survival.isRecipeOwned('arrows')).toBe(false);
+    expect(survival.craftItem('arrows')).toBe(true); // -1W -1St -> +4 arrows
+    expect(survival.inventory.arrows).toBe(4);
+    expect(survival.consumeArrow()).toBe(true);
+    expect(survival.inventory.arrows).toBe(3);
+
+    // Compound Bow unlocks bow + grants +6 starter arrows, and prevents double-craft without spending resources
+    expect(survival.isRecipeOwned('compound_bow')).toBe(false);
+    expect(survival.craftItem('compound_bow')).toBe(true); // -4W -2St -3Sc -> bow + 6 arrows
+    expect(survival.gear.hasCompoundBow).toBe(true);
+    expect(survival.isRecipeOwned('compound_bow')).toBe(true);
+    expect(survival.inventory.arrows).toBe(9);
+
+    const woodBeforeDup = survival.inventory.wood;
+    const stoneBeforeDup = survival.inventory.stone;
+    const scrapBeforeDup = survival.inventory.scrap;
+    expect(survival.craftItem('compound_bow')).toBe(false);
+    expect(survival.inventory.wood).toBe(woodBeforeDup);
+    expect(survival.inventory.stone).toBe(stoneBeforeDup);
+    expect(survival.inventory.scrap).toBe(scrapBeforeDup);
+    expect(survival.inventory.arrows).toBe(9);
+
+    // Remaining one-time gear recipes
+    expect(survival.craftItem('repair_hammer')).toBe(true);
+    expect(survival.gear.hasRepairHammer).toBe(true);
+    expect(survival.craftItem('repair_hammer')).toBe(false);
+
+    expect(survival.craftItem('reinforced_tools')).toBe(true);
+    expect(survival.gear.reinforcedTools).toBe(true);
+    expect(survival.craftItem('reinforced_tools')).toBe(false);
+
+    expect(survival.craftItem('upgraded_flashlight')).toBe(true);
+    expect(survival.gear.upgradedFlashlight).toBe(true);
+    expect(survival.craftItem('upgraded_flashlight')).toBe(false);
+
+    expect(survival.craftItem('scrap_armor')).toBe(true);
+    expect(survival.gear.scrapArmor).toBe(true);
+    expect(survival.craftItem('scrap_armor')).toBe(false);
+
+    // Drain remaining arrows and verify empty gate
+    for (let i = 0; i < 9; i += 1) {
+      expect(survival.consumeArrow()).toBe(true);
+    }
+    expect(survival.inventory.arrows).toBe(0);
+    expect(survival.consumeArrow()).toBe(false);
+
+    // Scrap armor mitigates combat damage by 38% (20 -> 12.4) while leaving exposure damage unmitigated (20 -> 20)
+    const combatDealt = survival.applyDamage(20);
+    expect(combatDealt).toBeCloseTo(12.4, 5);
+    expect(survival.vitals.health).toBeCloseTo(87.6, 5);
+
+    const exposureDealt = survival.applyDamage(20, 'exposure');
+    expect(exposureDealt).toBeCloseTo(20, 5);
+    expect(survival.vitals.health).toBeCloseTo(67.6, 5);
+
+    // Serialize -> reset -> hydrate round-trip preserves arrows and all 5 gear flags
+    survival.addLoot({ arrows: 5 });
+    const fullSnap = survival.serialize();
+    survival.reset();
+    expect(survival.inventory.arrows).toBe(0);
+    expect(survival.gear).toEqual({
+      hasCompoundBow: false,
+      hasRepairHammer: false,
+      reinforcedTools: false,
+      upgradedFlashlight: false,
+      scrapArmor: false,
+    });
+
+    survival.hydrate(fullSnap);
+    expect(survival.inventory.arrows).toBe(5);
+    expect(survival.gear).toEqual({
+      hasCompoundBow: true,
+      hasRepairHammer: true,
+      reinforcedTools: true,
+      upgradedFlashlight: true,
+      scrapArmor: true,
+    });
+
+    // reviveAtCamp preserves crafted gear & arrows
+    survival.applyDamage(500);
+    expect(survival.vitals.isDead).toBe(true);
+    survival.reviveAtCamp();
+    expect(survival.vitals.isDead).toBe(false);
+    expect(survival.inventory.arrows).toBe(5);
+    expect(survival.gear.hasCompoundBow).toBe(true);
+    expect(survival.gear.scrapArmor).toBe(true);
+
+    // Hydrating a legacy Phase 1 snapshot without arrows or gear defaults cleanly to 0 / false
+    survival.hydrate({
+      vitals: { health: 90, stamina: 80, hunger: 70, warmth: 60 },
+      inventory: {
+        rations: 1,
+        medkits: 0,
+        warmers: 2,
+        bottles: 1,
+        scrap: 4,
+        wood: 6,
+        stone: 3,
+      },
+    });
+    expect(survival.inventory.arrows).toBe(0);
+    expect(survival.gear).toEqual({
+      hasCompoundBow: false,
+      hasRepairHammer: false,
+      reinforcedTools: false,
+      upgradedFlashlight: false,
+      scrapArmor: false,
+    });
   });
 });

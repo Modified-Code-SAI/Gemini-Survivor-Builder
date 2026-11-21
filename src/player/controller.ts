@@ -24,7 +24,7 @@ export type PlayerStance =
   | 'attacking'
   | 'throwing';
 export type SurfaceKind = 'asphalt' | 'forest' | 'puddle';
-export type AttackClipKind = 'fists_right' | 'fists_left' | 'axe' | 'pickaxe';
+export type AttackClipKind = 'fists_right' | 'fists_left' | 'axe' | 'pickaxe' | 'hammer' | 'bow';
 
 export const HAND_TOOL_GRIP_OFFSET = { x: 0, y: 0.052, z: 0 } as const;
 
@@ -34,6 +34,23 @@ export const HAND_TOOL_GRIP_QUATERNION = {
   y: -0.331967,
   z: 0.672499,
   w: 0.218508,
+} as const;
+
+// Exact 6-decimal Three.js hand_L Compound Bow transforms verified in Blender against survivor.glb
+export const BOW_GRIP_OFFSET = { x: 0, y: 0.052, z: 0 } as const;
+
+export const BOW_CARRY_QUATERNION = {
+  x: 0.152921,
+  y: 0.283478,
+  z: -0.898617,
+  w: 0.297899,
+} as const;
+
+export const BOW_AIM_QUATERNION = {
+  x: 0.269944,
+  y: 0.601556,
+  z: -0.716906,
+  w: 0.22651,
 } as const;
 
 export function resolveAttackClipKind(
@@ -46,6 +63,12 @@ export function resolveAttackClipKind(
   if (tool === 'pickaxe') {
     return 'pickaxe';
   }
+  if (tool === 'hammer') {
+    return 'hammer';
+  }
+  if (tool === 'bow') {
+    return 'bow';
+  }
   return useLeftPunch ? 'fists_left' : 'fists_right';
 }
 
@@ -55,18 +78,28 @@ export interface PlayerControllerOptions {
   readonly canvas: HTMLCanvasElement;
   readonly obstacles: readonly Obstacle[];
   readonly isInsidePuddle?: (x: number, z: number) => boolean;
-  readonly getSupportHeight?: (x: number, z: number) => number;
+  readonly getSupportHeight?: (x: number, z: number, currentY?: number) => number;
   readonly isBuildMode?: () => boolean;
   readonly canSprint?: () => boolean;
   readonly canJump?: () => boolean;
   readonly canAttack?: () => boolean;
   readonly canThrowBottle?: () => boolean;
+  readonly canShootArrow?: () => boolean;
   readonly onFootstep?: (surface: SurfaceKind, intensity: number) => void;
   readonly onJump?: () => void;
   readonly onLand?: (surface: SurfaceKind) => void;
   readonly onAttackStart?: () => void;
   readonly onAttack?: () => void;
   readonly onAttackHitWindow?: (x: number, z: number, fwdX: number, fwdZ: number) => void;
+  readonly onBowEmpty?: () => void;
+  readonly onBowRelease?: (
+    originX: number,
+    originY: number,
+    originZ: number,
+    aimX: number,
+    aimY: number,
+    aimZ: number,
+  ) => void;
   readonly onInteract?: () => void;
   readonly onThrowBottle?: () => void;
   readonly onThrowEmpty?: () => void;
@@ -91,7 +124,9 @@ export interface PlayerControllerOptions {
   readonly onBuildSelectIndex?: (index: number) => void;
   readonly onBuildCycle?: (delta: number) => void;
   readonly onSelectTool?: (tool: EquippedTool) => void;
+  readonly onCycleTool?: () => void;
   readonly onCycleWorkbenchRecipe?: () => void;
+  readonly onTriggerSiege?: () => void;
   readonly onQuickSave?: () => void;
   readonly onStanceChange?: (stance: PlayerStance) => void;
   readonly onPointerLockChange?: (locked: boolean) => void;
@@ -105,6 +140,7 @@ export interface PlayerController {
   setInputEnabled(enabled: boolean): void;
   setFlashlightActive(active: boolean): void;
   setEquippedTool(tool: EquippedTool): void;
+  setReinforcedTools(enabled: boolean): void;
   getFlashlightTransform(outOrigin: THREE.Vector3, outDir: THREE.Vector3): void;
   getCameraRay(outOrigin: THREE.Vector3, outDir: THREE.Vector3): void;
   getStance(): PlayerStance;
@@ -169,6 +205,8 @@ interface GlbSurvivorState {
   readonly axeSwingUpperAction: THREE.AnimationAction | null;
   readonly pickaxeSwingAction: THREE.AnimationAction | null;
   readonly pickaxeSwingUpperAction: THREE.AnimationAction | null;
+  readonly bowShootAction: THREE.AnimationAction | null;
+  readonly bowShootUpperAction: THREE.AnimationAction | null;
   readonly throwAction: THREE.AnimationAction | null;
   readonly throwUpperAction: THREE.AnimationAction | null;
   wIdle: number;
@@ -184,6 +222,7 @@ interface GlbSurvivorState {
   wAttackLeft: number;
   wAxeSwing: number;
   wPickaxeSwing: number;
+  wBowShoot: number;
   wThrow: number;
 }
 
@@ -1313,12 +1352,40 @@ function createChestFlashlightProp(): ChestFlashlightProp {
 interface HandToolsProp {
   readonly group: THREE.Group;
   setTool(tool: EquippedTool): void;
+  setReinforced(enabled: boolean): void;
   dispose(): void;
 }
 
+interface LeftBowProp {
+  readonly group: THREE.Group;
+  setVisible(visible: boolean): void;
+  setAimBlend(blend: number): void;
+  dispose(): void;
+}
+
+function applyReinforcedSheenToTree(rootObj: THREE.Object3D | null, enabled: boolean): void {
+  if (!rootObj) {
+    return;
+  }
+  rootObj.traverse((node: THREE.Object3D) => {
+    if (!(node instanceof THREE.Mesh)) {
+      return;
+    }
+    const mats = Array.isArray(node.material) ? node.material : [node.material];
+    for (let i = 0; i < mats.length; i += 1) {
+      const mat = mats[i];
+      if (mat instanceof THREE.MeshStandardMaterial && mat.metalness >= 0.35) {
+        mat.emissive.setHex(enabled ? 0x1e2c36 : 0x000000);
+        mat.emissiveIntensity = enabled ? 0.55 : 0;
+        mat.needsUpdate = true;
+      }
+    }
+  });
+}
+
 /**
- * Compact PBR weathered Felling Axe & Pickaxe props mounted onto the survivor's right hand bone
- * (hand_R on survivor.glb or axePivot on the procedural fallback) and disposed cleanly once.
+ * Compact PBR weathered Felling Axe, Survival Pickaxe & Framing Repair Hammer props mounted
+ * onto the survivor's right hand bone (hand_R on survivor.glb or axePivot on fallback) and disposed once.
  */
 function createHandToolsProp(): HandToolsProp {
   const group = new THREE.Group();
@@ -1326,12 +1393,17 @@ function createHandToolsProp(): HandToolsProp {
 
   const axeFallbackGeos: THREE.BufferGeometry[] = [];
   const pickFallbackGeos: THREE.BufferGeometry[] = [];
+  const hammerFallbackGeos: THREE.BufferGeometry[] = [];
   const trackAxeGeo = <T extends THREE.BufferGeometry>(g: T): T => {
     axeFallbackGeos.push(g);
     return g;
   };
   const trackPickGeo = <T extends THREE.BufferGeometry>(g: T): T => {
     pickFallbackGeos.push(g);
+    return g;
+  };
+  const trackHammerGeo = <T extends THREE.BufferGeometry>(g: T): T => {
+    hammerFallbackGeos.push(g);
     return g;
   };
 
@@ -1436,9 +1508,57 @@ function createHandToolsProp(): HandToolsProp {
   pickGroup.visible = false;
   group.add(pickGroup);
 
+  // 3. Forged Framing Repair Hammer (instant procedural fallback replaced asynchronously by repair_hammer.glb)
+  const hammerGroup = new THREE.Group();
+  const hammerHaft = new THREE.Mesh(
+    trackHammerGeo(new THREE.CylinderGeometry(0.015, 0.019, 0.4, 8)),
+    handleMat,
+  );
+  hammerHaft.position.set(0, 0.1, 0);
+  hammerHaft.castShadow = true;
+  hammerGroup.add(hammerHaft);
+
+  const hammerGrip = new THREE.Mesh(
+    trackHammerGeo(new THREE.CylinderGeometry(0.019, 0.021, 0.15, 8)),
+    wrapMat,
+  );
+  hammerGrip.position.set(0, -0.02, 0);
+  hammerGroup.add(hammerGrip);
+
+  const hammerHead = new THREE.Mesh(
+    trackHammerGeo(new THREE.BoxGeometry(0.044, 0.048, 0.075)),
+    steelMat,
+  );
+  hammerHead.position.set(0, 0.28, 0);
+  hammerHead.castShadow = true;
+  hammerGroup.add(hammerHead);
+
+  const hammerBell = new THREE.Mesh(
+    trackHammerGeo(new THREE.CylinderGeometry(0.024, 0.02, 0.055, 8)),
+    edgeMat,
+  );
+  hammerBell.position.set(0, 0.28, -0.06);
+  hammerBell.rotation.x = Math.PI * 0.5;
+  hammerBell.castShadow = true;
+  hammerGroup.add(hammerBell);
+
+  const hammerClaw = new THREE.Mesh(
+    trackHammerGeo(new THREE.BoxGeometry(0.034, 0.024, 0.085)),
+    steelMat,
+  );
+  hammerClaw.position.set(0, 0.268, 0.068);
+  hammerClaw.rotation.x = 0.35;
+  hammerClaw.castShadow = true;
+  hammerGroup.add(hammerClaw);
+
+  hammerGroup.visible = false;
+  group.add(hammerGroup);
+
   let toolsDisposed = false;
+  let reinforcedEnabled = false;
   let axeGlbScene: THREE.Group | null = null;
   let pickGlbScene: THREE.Group | null = null;
+  let hammerGlbScene: THREE.Group | null = null;
 
   void loadOptionalGlbSlot('felling_axe').then((loaded) => {
     if (!loaded) {
@@ -1458,6 +1578,9 @@ function createHandToolsProp(): HandToolsProp {
     loaded.scale.setScalar(1);
     axeGroup.add(loaded);
     axeGlbScene = loaded;
+    if (reinforcedEnabled) {
+      applyReinforcedSheenToTree(axeGlbScene, true);
+    }
   });
 
   void loadOptionalGlbSlot('pickaxe').then((loaded) => {
@@ -1478,6 +1601,29 @@ function createHandToolsProp(): HandToolsProp {
     loaded.scale.setScalar(1);
     pickGroup.add(loaded);
     pickGlbScene = loaded;
+    if (reinforcedEnabled) {
+      applyReinforcedSheenToTree(pickGlbScene, true);
+    }
+  });
+
+  void loadOptionalGlbSlot('repair_hammer').then((loaded) => {
+    if (!loaded) {
+      return;
+    }
+    if (toolsDisposed) {
+      disposeObject3DTree(loaded);
+      return;
+    }
+    hammerGroup.clear();
+    for (let i = 0; i < hammerFallbackGeos.length; i += 1) {
+      hammerFallbackGeos[i]?.dispose();
+    }
+    hammerFallbackGeos.length = 0;
+    loaded.position.set(0, 0, 0);
+    loaded.rotation.set(0, 0, 0);
+    loaded.scale.setScalar(1);
+    hammerGroup.add(loaded);
+    hammerGlbScene = loaded;
   });
 
   return {
@@ -1485,7 +1631,19 @@ function createHandToolsProp(): HandToolsProp {
     setTool(tool: EquippedTool): void {
       axeGroup.visible = tool === 'axe';
       pickGroup.visible = tool === 'pickaxe';
-      group.visible = tool !== 'fists';
+      hammerGroup.visible = tool === 'hammer';
+      group.visible = tool === 'axe' || tool === 'pickaxe' || tool === 'hammer';
+    },
+    setReinforced(enabled: boolean): void {
+      reinforcedEnabled = enabled;
+      steelMat.color.setHex(enabled ? 0x8d9aa4 : 0x62686c);
+      steelMat.emissive.setHex(enabled ? 0x1a2630 : 0x000000);
+      steelMat.emissiveIntensity = enabled ? 0.45 : 0;
+      edgeMat.color.setHex(enabled ? 0xc8d7e0 : 0xa2abb0);
+      edgeMat.emissive.setHex(enabled ? 0x223340 : 0x000000);
+      edgeMat.emissiveIntensity = enabled ? 0.5 : 0;
+      applyReinforcedSheenToTree(axeGlbScene, enabled);
+      applyReinforcedSheenToTree(pickGlbScene, enabled);
     },
     dispose(): void {
       toolsDisposed = true;
@@ -1498,6 +1656,10 @@ function createHandToolsProp(): HandToolsProp {
         pickFallbackGeos[i]?.dispose();
       }
       pickFallbackGeos.length = 0;
+      for (let i = 0; i < hammerFallbackGeos.length; i += 1) {
+        hammerFallbackGeos[i]?.dispose();
+      }
+      hammerFallbackGeos.length = 0;
       handleMat.dispose();
       wrapMat.dispose();
       steelMat.dispose();
@@ -1510,8 +1672,133 @@ function createHandToolsProp(): HandToolsProp {
         disposeObject3DTree(pickGlbScene);
         pickGlbScene = null;
       }
+      if (hammerGlbScene) {
+        disposeObject3DTree(hammerGlbScene);
+        hammerGlbScene = null;
+      }
       axeGroup.clear();
       pickGroup.clear();
+      hammerGroup.clear();
+      group.clear();
+    },
+  };
+}
+
+/**
+ * Tactical Survival Compound Bow mounted onto the survivor's left hand bone (hand_L on survivor.glb
+ * or leftForearm on procedural fallback), async-upgraded to sculpted PBR compound_bow.glb.
+ */
+function createLeftBowProp(): LeftBowProp {
+  const group = new THREE.Group();
+  group.name = 'SurvivorCompoundBow';
+  group.visible = false;
+
+  const fallbackGeos: THREE.BufferGeometry[] = [];
+  const trackGeo = <T extends THREE.BufferGeometry>(g: T): T => {
+    fallbackGeos.push(g);
+    return g;
+  };
+
+  const riserMat = new THREE.MeshStandardMaterial({
+    color: 0x333935,
+    roughness: 0.56,
+    metalness: 0.65,
+  });
+  const limbMat = new THREE.MeshStandardMaterial({
+    color: 0x222523,
+    roughness: 0.68,
+    metalness: 0.28,
+  });
+  const stringMat = new THREE.MeshStandardMaterial({
+    color: 0xc2b9a5,
+    roughness: 0.85,
+    metalness: 0.05,
+  });
+
+  // Procedural Compound Bow matching compound_bow.glb axes: origin=(0,0,0) grip, +Y vertical, -Z front, +Z string
+  const riser = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.032, 0.34, 0.052)), riserMat);
+  riser.castShadow = true;
+  group.add(riser);
+
+  for (const dir of [-1, 1] as const) {
+    const limb = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.024, 0.34, 0.032)), limbMat);
+    limb.position.set(0, dir * 0.31, 0.065);
+    limb.rotation.x = dir * 0.36;
+    limb.castShadow = true;
+    group.add(limb);
+
+    const cam = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.042, 0.042, 0.018, 10)), riserMat);
+    cam.position.set(0, dir * 0.45, 0.14);
+    cam.rotation.z = Math.PI * 0.5;
+    cam.castShadow = true;
+    group.add(cam);
+  }
+
+  const bowString = new THREE.Mesh(
+    trackGeo(new THREE.CylinderGeometry(0.003, 0.003, 0.9, 6)),
+    stringMat,
+  );
+  bowString.position.set(0, 0, 0.165);
+  group.add(bowString);
+
+  let bowDisposed = false;
+  let bowGlbScene: THREE.Group | null = null;
+
+  void loadOptionalGlbSlot('compound_bow').then((loaded) => {
+    if (!loaded) {
+      return;
+    }
+    if (bowDisposed) {
+      disposeObject3DTree(loaded);
+      return;
+    }
+    group.clear();
+    for (let i = 0; i < fallbackGeos.length; i += 1) {
+      fallbackGeos[i]?.dispose();
+    }
+    fallbackGeos.length = 0;
+    loaded.position.set(0, 0, 0);
+    loaded.rotation.set(0, 0, 0);
+    loaded.scale.setScalar(1);
+    group.add(loaded);
+    bowGlbScene = loaded;
+  });
+
+  const carryQuat = new THREE.Quaternion(
+    BOW_CARRY_QUATERNION.x,
+    BOW_CARRY_QUATERNION.y,
+    BOW_CARRY_QUATERNION.z,
+    BOW_CARRY_QUATERNION.w,
+  );
+  const aimQuat = new THREE.Quaternion(
+    BOW_AIM_QUATERNION.x,
+    BOW_AIM_QUATERNION.y,
+    BOW_AIM_QUATERNION.z,
+    BOW_AIM_QUATERNION.w,
+  );
+
+  return {
+    group,
+    setVisible(visible: boolean): void {
+      group.visible = visible;
+    },
+    setAimBlend(blend: number): void {
+      group.quaternion.slerpQuaternions(carryQuat, aimQuat, clamp(blend, 0, 1));
+    },
+    dispose(): void {
+      bowDisposed = true;
+      group.removeFromParent();
+      for (let i = 0; i < fallbackGeos.length; i += 1) {
+        fallbackGeos[i]?.dispose();
+      }
+      fallbackGeos.length = 0;
+      riserMat.dispose();
+      limbMat.dispose();
+      stringMat.dispose();
+      if (bowGlbScene) {
+        disposeObject3DTree(bowGlbScene);
+        bowGlbScene = null;
+      }
       group.clear();
     },
   };
@@ -1559,8 +1846,8 @@ export function createPlayerController(options: PlayerControllerOptions): Player
     onPointerLockChange,
   } = options;
 
-  const sampleSupportHeight = (x: number, z: number): number =>
-    getSupportHeight ? getSupportHeight(x, z) : getTerrainHeight(x, z);
+  const sampleSupportHeight = (x: number, z: number, currentY?: number): number =>
+    getSupportHeight ? getSupportHeight(x, z, currentY) : getTerrainHeight(x, z);
 
   const atlas = getWorldTextureAtlas();
   const rig = buildSurvivorRig(atlas.fabricOlive);
@@ -1574,7 +1861,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
   chestFlashlight.group.position.set(0.142, 0.34, -0.175);
   rig.chestUpper.add(chestFlashlight.group);
 
-  // Replace procedural axe meshes visually with unified switchable Felling Axe / Pickaxe / Fists prop
+  // Replace procedural axe meshes visually with unified switchable Felling Axe / Pickaxe / Hammer prop
   for (let i = 0; i < rig.axePivot.children.length; i += 1) {
     const child = rig.axePivot.children[i];
     if (child) {
@@ -1585,6 +1872,18 @@ export function createPlayerController(options: PlayerControllerOptions): Player
   let equippedTool: EquippedTool = 'axe';
   handTools.setTool(equippedTool);
   rig.axePivot.add(handTools.group);
+
+  const leftBow = createLeftBowProp();
+  leftBow.setVisible(false);
+  leftBow.group.position.set(0, -0.26, -0.04);
+  rig.leftForearm.add(leftBow.group);
+
+  const scratchBowCarryQuat = new THREE.Quaternion(
+    BOW_CARRY_QUATERNION.x,
+    BOW_CARRY_QUATERNION.y,
+    BOW_CARRY_QUATERNION.z,
+    BOW_CARRY_QUATERNION.w,
+  );
 
   let disposed = false;
   let proceduralRigDisposed = false;
@@ -1628,6 +1927,8 @@ export function createPlayerController(options: PlayerControllerOptions): Player
   const ATTACK_LEFT_TIME_SCALE = 1.24;
   const AXE_SWING_TIME_SCALE = 1.32;
   const PICKAXE_SWING_TIME_SCALE = 1.32;
+  const HAMMER_SWING_TIME_SCALE = 1.45;
+  const BOW_SHOOT_TIME_SCALE = 1.28;
   const ATTACK_DURATION = 0.74;
   const ATTACK_COOLDOWN = 0.76;
   const ATTACK_WHOOSH_TIME = 0.19;
@@ -1743,6 +2044,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
     const attackRightClip = findUniqueClip(clips, 'attack', usedClips, true, ['left']);
     const pickaxeSwingClip = findUniqueClip(clips, 'pickaxe_swing', usedClips, true);
     const axeSwingClip = findUniqueClip(clips, 'axe_swing', usedClips, true, ['pickaxe']);
+    const bowShootClip = findUniqueClip(clips, 'bow_shoot', usedClips, true);
     const throwClip = findUniqueClip(clips, 'throw', usedClips, true);
     if (!idleClip) {
       const firstUnused = clips.find((c) => !usedClips.has(c)) ?? null;
@@ -1815,6 +2117,10 @@ export function createPlayerController(options: PlayerControllerOptions): Player
     const pickaxeSwingUpperAction = setupOneShotAction(
       filterClipByBodyRegion(pickaxeSwingClip, 'upper', false),
     );
+    const bowShootAction = setupOneShotAction(bowShootClip);
+    const bowShootUpperAction = setupOneShotAction(
+      filterClipByBodyRegion(bowShootClip, 'upper', false),
+    );
     const throwAction = setupOneShotAction(throwClip);
     const throwUpperAction = setupOneShotAction(filterClipByBodyRegion(throwClip, 'upper', false));
 
@@ -1852,7 +2158,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       chestFlashlight.group.scale.setScalar(1);
     }
 
-    // Detach switchable Felling Axe / Pickaxe prop before disposing procedural rig, then mount onto hand_R
+    // Detach switchable Felling Axe / Pickaxe / Hammer prop before disposing procedural rig, then mount onto hand_R
     handTools.group.removeFromParent();
     const handBone =
       loaded.scene.getObjectByName('hand_R') ??
@@ -1883,7 +2189,33 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       wrapper.add(handTools.group);
     }
 
-    // Resume any in-flight airborne, landing, throw, or melee/tool action seamlessly if GLB loads mid-action
+    // Detach Compound Bow prop before disposing procedural rig, then mount onto hand_L
+    leftBow.group.removeFromParent();
+    const handLBone =
+      loaded.scene.getObjectByName('hand_L') ??
+      loaded.scene.getObjectByName('wrist_L') ??
+      loaded.scene.getObjectByName('lowerarm_L');
+    if (handLBone) {
+      const handLWorldScale = new THREE.Vector3(1, 1, 1);
+      handLBone.getWorldScale(handLWorldScale);
+      const invHandLScale =
+        Number.isFinite(handLWorldScale.x) && handLWorldScale.x > 1e-4 ? 1 / handLWorldScale.x : 1;
+      leftBow.group.position.set(
+        BOW_GRIP_OFFSET.x * invHandLScale,
+        BOW_GRIP_OFFSET.y * invHandLScale,
+        BOW_GRIP_OFFSET.z * invHandLScale,
+      );
+      leftBow.group.quaternion.copy(scratchBowCarryQuat);
+      leftBow.group.scale.setScalar(invHandLScale);
+      handLBone.add(leftBow.group);
+    } else {
+      leftBow.group.position.set(-0.32, 0.96, -0.18);
+      leftBow.group.rotation.set(0, 0, 0);
+      leftBow.group.scale.setScalar(1);
+      wrapper.add(leftBow.group);
+    }
+
+    // Resume any in-flight airborne, landing, throw, or melee/tool/bow action seamlessly if GLB loads mid-action
     if (isAirborne && jumpStartAction) {
       jumpStartAction.reset();
       jumpStartAction.setLoop(THREE.LoopOnce, 1);
@@ -1915,6 +2247,14 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         activeAction = pickaxeSwingAction ?? axeSwingAction;
         activeUpperAction = pickaxeSwingUpperAction ?? axeSwingUpperAction;
         scale = pickaxeSwingAction ? PICKAXE_SWING_TIME_SCALE : AXE_SWING_TIME_SCALE;
+      } else if (activeAttackKind === 'hammer') {
+        activeAction = pickaxeSwingAction ?? axeSwingAction;
+        activeUpperAction = pickaxeSwingUpperAction ?? axeSwingUpperAction;
+        scale = HAMMER_SWING_TIME_SCALE;
+      } else if (activeAttackKind === 'bow') {
+        activeAction = bowShootAction;
+        activeUpperAction = bowShootUpperAction;
+        scale = BOW_SHOOT_TIME_SCALE;
       } else if (activeAttackKind === 'fists_left') {
         activeAction = attackLeftAction ?? attackRightAction;
         activeUpperAction = attackLeftUpperAction ?? attackRightUpperAction;
@@ -1966,6 +2306,8 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       axeSwingUpperAction,
       pickaxeSwingAction,
       pickaxeSwingUpperAction,
+      bowShootAction,
+      bowShootUpperAction,
       throwAction,
       throwUpperAction,
       wIdle: 1,
@@ -1981,6 +2323,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       wAttackLeft: 0,
       wAxeSwing: 0,
       wPickaxeSwing: 0,
+      wBowShoot: 0,
       wThrow: 0,
     };
   });
@@ -2050,7 +2393,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
     throwReleasePending = false;
 
     // Reconcile elevation against terrain before launching so fast uphill sprints never start underground
-    const launchGroundY = sampleSupportHeight(position.x, position.z);
+    const launchGroundY = sampleSupportHeight(position.x, position.z, position.y);
     if (position.y < launchGroundY) {
       position.y = launchGroundY;
       groundedY = launchGroundY;
@@ -2068,6 +2411,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       glbState.wAttackLeft = 0;
       glbState.wAxeSwing = 0;
       glbState.wPickaxeSwing = 0;
+      glbState.wBowShoot = 0;
       glbState.wThrow = 0;
       if (glbState.jumpLandAction) {
         glbState.jumpLandAction.stop();
@@ -2077,6 +2421,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       stopCombatActionPair(glbState.attackLeftAction, glbState.attackLeftUpperAction);
       stopCombatActionPair(glbState.axeSwingAction, glbState.axeSwingUpperAction);
       stopCombatActionPair(glbState.pickaxeSwingAction, glbState.pickaxeSwingUpperAction);
+      stopCombatActionPair(glbState.bowShootAction ?? null, glbState.bowShootUpperAction ?? null);
       stopCombatActionPair(glbState.throwAction, glbState.throwUpperAction);
       if (glbState.jumpStartAction) {
         glbState.jumpStartAction.reset();
@@ -2093,15 +2438,19 @@ export function createPlayerController(options: PlayerControllerOptions): Player
   };
 
   const triggerAttack = (): void => {
-    if (
-      !inputEnabled ||
-      isAirborne ||
-      attackCooldown > 0 ||
-      throwTimer > 0 ||
-      (canAttack && !canAttack())
-    ) {
+    if (!inputEnabled || isAirborne || attackCooldown > 0 || throwTimer > 0) {
       return;
     }
+    if (equippedTool === 'bow') {
+      if (options.canShootArrow && !options.canShootArrow()) {
+        options.onBowEmpty?.();
+        return;
+      }
+    }
+    if (canAttack && !canAttack()) {
+      return;
+    }
+
     activeAttackKind = resolveAttackClipKind(equippedTool, nextPunchLeft);
     if (equippedTool === 'fists') {
       nextPunchLeft = !nextPunchLeft;
@@ -2113,6 +2462,12 @@ export function createPlayerController(options: PlayerControllerOptions): Player
     } else if (activeAttackKind === 'pickaxe') {
       attackTimer = PICKAXE_ATTACK_DURATION;
       attackCooldown = PICKAXE_ATTACK_COOLDOWN;
+    } else if (activeAttackKind === 'hammer') {
+      attackTimer = 0.72;
+      attackCooldown = 0.74;
+    } else if (activeAttackKind === 'bow') {
+      attackTimer = 0.9;
+      attackCooldown = 0.94;
     } else {
       attackTimer = ATTACK_DURATION;
       attackCooldown = ATTACK_COOLDOWN;
@@ -2128,10 +2483,12 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       glbState.wAttackLeft = 0;
       glbState.wAxeSwing = 0;
       glbState.wPickaxeSwing = 0;
+      glbState.wBowShoot = 0;
       stopCombatActionPair(glbState.attackRightAction, glbState.attackRightUpperAction);
       stopCombatActionPair(glbState.attackLeftAction, glbState.attackLeftUpperAction);
       stopCombatActionPair(glbState.axeSwingAction, glbState.axeSwingUpperAction);
       stopCombatActionPair(glbState.pickaxeSwingAction, glbState.pickaxeSwingUpperAction);
+      stopCombatActionPair(glbState.bowShootAction ?? null, glbState.bowShootUpperAction ?? null);
 
       let activeAction: THREE.AnimationAction | null = null;
       let activeUpperAction: THREE.AnimationAction | null = null;
@@ -2145,6 +2502,14 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         activeAction = glbState.pickaxeSwingAction ?? glbState.axeSwingAction;
         activeUpperAction = glbState.pickaxeSwingUpperAction ?? glbState.axeSwingUpperAction;
         scale = glbState.pickaxeSwingAction ? PICKAXE_SWING_TIME_SCALE : AXE_SWING_TIME_SCALE;
+      } else if (activeAttackKind === 'hammer') {
+        activeAction = glbState.pickaxeSwingAction ?? glbState.axeSwingAction;
+        activeUpperAction = glbState.pickaxeSwingUpperAction ?? glbState.axeSwingUpperAction;
+        scale = HAMMER_SWING_TIME_SCALE;
+      } else if (activeAttackKind === 'bow') {
+        activeAction = glbState.bowShootAction ?? null;
+        activeUpperAction = glbState.bowShootUpperAction ?? null;
+        scale = BOW_SHOOT_TIME_SCALE;
       } else if (activeAttackKind === 'fists_left') {
         activeAction = glbState.attackLeftAction ?? glbState.attackRightAction;
         activeUpperAction = glbState.attackLeftUpperAction ?? glbState.attackRightUpperAction;
@@ -2296,10 +2661,19 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         }
         break;
       case 'KeyQ':
-        if (!event.repeat && onSelectTool) {
-          const nextTool: EquippedTool =
-            equippedTool === 'axe' ? 'pickaxe' : equippedTool === 'pickaxe' ? 'fists' : 'axe';
-          onSelectTool(nextTool);
+        if (!event.repeat) {
+          if (options.onCycleTool) {
+            options.onCycleTool();
+          } else if (onSelectTool) {
+            const nextTool: EquippedTool =
+              equippedTool === 'axe' ? 'pickaxe' : equippedTool === 'pickaxe' ? 'fists' : 'axe';
+            onSelectTool(nextTool);
+          }
+        }
+        break;
+      case 'KeyN':
+        if (!event.repeat && options.onTriggerSiege) {
+          options.onTriggerSiege();
         }
         break;
       case 'Digit1':
@@ -2357,8 +2731,31 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         }
         break;
       case 'Digit7':
-        if (!event.repeat && isBuildMode && isBuildMode() && onBuildSelectIndex) {
-          onBuildSelectIndex(6);
+        if (!event.repeat) {
+          if (isBuildMode && isBuildMode()) {
+            onBuildSelectIndex?.(6);
+          } else if (onSelectTool) {
+            onSelectTool('bow');
+          }
+        }
+        break;
+      case 'Digit8':
+        if (!event.repeat) {
+          if (isBuildMode && isBuildMode()) {
+            onBuildSelectIndex?.(7);
+          } else if (onSelectTool) {
+            onSelectTool('hammer');
+          }
+        }
+        break;
+      case 'Digit9':
+        if (!event.repeat && isBuildMode && isBuildMode()) {
+          onBuildSelectIndex?.(8);
+        }
+        break;
+      case 'Digit0':
+        if (!event.repeat && isBuildMode && isBuildMode()) {
+          onBuildSelectIndex?.(9);
         }
         break;
       case 'KeyL':
@@ -2614,8 +3011,8 @@ export function createPlayerController(options: PlayerControllerOptions): Player
 
       scratchCamProbe2D.x = px;
       scratchCamProbe2D.z = pz;
-      const hitObs = resolveHorizontalCollision(scratchCamProbe2D, 0.3, obstacles);
-      const probeGroundY = sampleSupportHeight(px, pz);
+      const hitObs = resolveHorizontalCollision(scratchCamProbe2D, 0.3, obstacles, py - 0.5, 0.6);
+      const probeGroundY = sampleSupportHeight(px, pz, py);
 
       if (hitObs || py < probeGroundY + 0.3) {
         safeDist = Math.max(0.35, dist - 0.25);
@@ -2629,7 +3026,11 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       scratchCamTarget.z + scratchBack.z * safeDist,
     );
 
-    const camGroundY = sampleSupportHeight(scratchCamDesired.x, scratchCamDesired.z);
+    const camGroundY = sampleSupportHeight(
+      scratchCamDesired.x,
+      scratchCamDesired.z,
+      scratchCamDesired.y,
+    );
     if (scratchCamDesired.y < camGroundY + 0.36) {
       scratchCamDesired.y = camGroundY + 0.36;
     }
@@ -2679,6 +3080,10 @@ export function createPlayerController(options: PlayerControllerOptions): Player
     setEquippedTool(tool: EquippedTool): void {
       equippedTool = tool;
       handTools.setTool(tool);
+      leftBow.setVisible(tool === 'bow');
+    },
+    setReinforcedTools(enabled: boolean): void {
+      handTools.setReinforced(enabled);
     },
     getFlashlightTransform(outOrigin: THREE.Vector3, outDir: THREE.Vector3): void {
       chestFlashlight.lensAnchor.updateWorldMatrix(true, false);
@@ -2797,6 +3202,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         glbState.wAttackLeft = 0;
         glbState.wAxeSwing = 0;
         glbState.wPickaxeSwing = 0;
+        glbState.wBowShoot = 0;
         glbState.wThrow = 0;
         if (glbState.idleLowerAction) {
           glbState.idleLowerAction.setEffectiveWeight(0);
@@ -2831,7 +3237,9 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         stopCombatActionPair(glbState.attackLeftAction, glbState.attackLeftUpperAction);
         stopCombatActionPair(glbState.axeSwingAction, glbState.axeSwingUpperAction);
         stopCombatActionPair(glbState.pickaxeSwingAction, glbState.pickaxeSwingUpperAction);
+        stopCombatActionPair(glbState.bowShootAction ?? null, glbState.bowShootUpperAction ?? null);
         stopCombatActionPair(glbState.throwAction, glbState.throwUpperAction);
+        leftBow.setAimBlend(0);
       }
       updateStance('standing');
       initCameraTransform();
@@ -2854,29 +3262,59 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       if (attackTimer > 0) {
         attackElapsed += dt;
         attackTimer = Math.max(0, attackTimer - dt);
-        const currentHitTime =
-          activeAttackKind === 'axe'
-            ? 0.37
-            : activeAttackKind === 'pickaxe'
-              ? 0.41
-              : ATTACK_WHOOSH_TIME;
-        if (attackWhooshPending && attackElapsed >= currentHitTime) {
-          attackWhooshPending = false;
-          if (onAttack) {
-            onAttack();
+        if (activeAttackKind === 'bow') {
+          characterYaw = lerpAngle(characterYaw, cameraYaw, Math.min(1, dt * 16));
+          if (attackWhooshPending && attackElapsed >= 0.48) {
+            attackWhooshPending = false;
+            const cosP = Math.cos(cameraPitch);
+            const aimX = -Math.sin(cameraYaw) * cosP;
+            const aimY = Math.sin(cameraPitch);
+            const aimZ = -Math.cos(cameraYaw) * cosP;
+            const relX = position.x + aimX * 0.52;
+            const relY = position.y + 1.46 - crouchBlend * 0.34 + aimY * 0.3;
+            const relZ = position.z + aimZ * 0.52;
+            options.onBowRelease?.(relX, relY, relZ, aimX, aimY, aimZ);
           }
-          if (onAttackHitWindow) {
-            onAttackHitWindow(position.x, position.z, -Math.sin(characterYaw), -Math.cos(characterYaw));
+          const impulseStart = 0.44;
+          if (attackElapsed >= impulseStart && attackElapsed <= impulseStart + 0.24) {
+            const u = (attackElapsed - impulseStart) / 0.24;
+            const s = Math.sin(u * Math.PI);
+            attackCameraImpulse = s * s * 0.7;
+          } else {
+            attackCameraImpulse = 0;
           }
-        }
-        // Subtle tactile shoulder-camera micro-impulse peaking across the punch/chop/strike arc
-        const impulseStart = Math.max(0.05, currentHitTime - 0.05);
-        if (attackElapsed >= impulseStart && attackElapsed <= impulseStart + 0.34) {
-          const u = (attackElapsed - impulseStart) / 0.34;
-          const s = Math.sin(u * Math.PI);
-          attackCameraImpulse = s * s;
         } else {
-          attackCameraImpulse = 0;
+          const currentHitTime =
+            activeAttackKind === 'axe'
+              ? 0.37
+              : activeAttackKind === 'pickaxe'
+                ? 0.41
+                : activeAttackKind === 'hammer'
+                  ? 0.32
+                  : ATTACK_WHOOSH_TIME;
+          if (attackWhooshPending && attackElapsed >= currentHitTime) {
+            attackWhooshPending = false;
+            if (onAttack) {
+              onAttack();
+            }
+            if (onAttackHitWindow) {
+              onAttackHitWindow(
+                position.x,
+                position.z,
+                -Math.sin(characterYaw),
+                -Math.cos(characterYaw),
+              );
+            }
+          }
+          // Subtle tactile shoulder-camera micro-impulse peaking across the punch/chop/strike arc
+          const impulseStart = Math.max(0.05, currentHitTime - 0.05);
+          if (attackElapsed >= impulseStart && attackElapsed <= impulseStart + 0.34) {
+            const u = (attackElapsed - impulseStart) / 0.34;
+            const s = Math.sin(u * Math.PI);
+            attackCameraImpulse = s * s;
+          } else {
+            attackCameraImpulse = 0;
+          }
         }
       } else {
         attackCameraImpulse = 0;
@@ -2996,7 +3434,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
 
         scratchPos2D.x = position.x + airVelX * dt;
         scratchPos2D.z = position.z + airVelZ * dt;
-        resolveHorizontalCollision(scratchPos2D, PLAYER_RADIUS, obstacles);
+        resolveHorizontalCollision(scratchPos2D, PLAYER_RADIUS, obstacles, position.y);
         position.x = scratchPos2D.x;
         position.z = scratchPos2D.z;
       } else {
@@ -3023,13 +3461,13 @@ export function createPlayerController(options: PlayerControllerOptions): Player
 
           scratchPos2D.x = position.x + airVelX * dt;
           scratchPos2D.z = position.z + airVelZ * dt;
-          resolveHorizontalCollision(scratchPos2D, PLAYER_RADIUS, obstacles);
+          resolveHorizontalCollision(scratchPos2D, PLAYER_RADIUS, obstacles, position.y);
 
           position.x = scratchPos2D.x;
           position.z = scratchPos2D.z;
 
           const targetCharYaw = Math.atan2(-dirX, -dirZ);
-          if (throwTimer <= 0) {
+          if (throwTimer <= 0 && !(attackTimer > 0 && activeAttackKind === 'bow')) {
             if (attackTimer > 0 && moveForward > 0) {
               characterYaw = lerpAngle(characterYaw, cameraYaw, Math.min(1, dt * 10));
             } else {
@@ -3049,7 +3487,12 @@ export function createPlayerController(options: PlayerControllerOptions): Player
             scratchPos2D.x = position.x;
             scratchPos2D.z = position.z;
           }
-          const hitStopWall = resolveHorizontalCollision(scratchPos2D, PLAYER_RADIUS, obstacles);
+          const hitStopWall = resolveHorizontalCollision(
+            scratchPos2D,
+            PLAYER_RADIUS,
+            obstacles,
+            position.y,
+          );
           const postLocoX = scratchPos2D.x;
           const postLocoZ = scratchPos2D.z;
           position.x = postLocoX;
@@ -3060,7 +3503,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
 
           if (attackTimer > 0) {
             // Snappily align torso toward camera aim; step forward ONLY for bare-fists brawling punches
-            // so chopping trees or mining rocks keeps the survivor planted cleanly without clipping into targets
+            // so chopping trees, mining rocks, hammering walls, or shooting bows stays planted cleanly
             characterYaw = lerpAngle(characterYaw, cameraYaw, Math.min(1, dt * 18));
             const isFistPunch =
               activeAttackKind === 'fists_right' || activeAttackKind === 'fists_left';
@@ -3069,7 +3512,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
               const lungeSpeed = Math.sin(lungeU * Math.PI) * 1.65;
               scratchPos2D.x = position.x - Math.sin(characterYaw) * lungeSpeed * dt;
               scratchPos2D.z = position.z - Math.cos(characterYaw) * lungeSpeed * dt;
-              resolveHorizontalCollision(scratchPos2D, PLAYER_RADIUS, obstacles);
+              resolveHorizontalCollision(scratchPos2D, PLAYER_RADIUS, obstacles, position.y);
               lungeDispX = scratchPos2D.x - postLocoX;
               lungeDispZ = scratchPos2D.z - postLocoZ;
               position.x = scratchPos2D.x;
@@ -3091,8 +3534,8 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       const instantActualSpeed = dt > 1e-5 ? actualDisp / dt : 0;
       smoothedActualSpeed += (instantActualSpeed - smoothedActualSpeed) * Math.min(1, dt * 16);
 
-      // Vertical terrain follow & ballistic jump physics
-      const targetGroundY = sampleSupportHeight(position.x, position.z);
+      // Vertical terrain & multi-story deck/stair follow + ballistic jump physics
+      const targetGroundY = sampleSupportHeight(position.x, position.z, position.y);
       if (isAirborne) {
         airElapsed += dt;
         verticalVelocity -= GRAVITY * dt;
@@ -3329,11 +3772,12 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         glbState.wJumpLand += (targetJumpLand - glbState.wJumpLand) * jlAlpha;
         if (glbState.wJumpLand < 0.001 && targetJumpLand === 0) glbState.wJumpLand = 0;
 
-        // Tool-aware combat/harvesting envelopes: axe chop, pickaxe mine, right cross, or left jab
+        // Tool-aware combat/harvesting envelopes: axe chop, pickaxe/hammer strike, bow draw-release, or bare-fist punches
         let targetAttackRight = 0;
         let targetAttackLeft = 0;
         let targetAxeSwing = 0;
         let targetPickaxeSwing = 0;
+        let targetBowShoot = 0;
         if (attackTimer > 0 && !isAirborne) {
           const fadeIn = clamp(attackElapsed / 0.09, 0, 1);
           const fadeOut = clamp(attackTimer / 0.2, 0, 1);
@@ -3344,11 +3788,15 @@ export function createPlayerController(options: PlayerControllerOptions): Player
             } else if (glbState.pickaxeSwingAction) {
               targetPickaxeSwing = atkEnv;
             }
-          } else if (activeAttackKind === 'pickaxe') {
+          } else if (activeAttackKind === 'pickaxe' || activeAttackKind === 'hammer') {
             if (glbState.pickaxeSwingAction) {
               targetPickaxeSwing = atkEnv;
             } else if (glbState.axeSwingAction) {
               targetAxeSwing = atkEnv;
+            }
+          } else if (activeAttackKind === 'bow') {
+            if (glbState.bowShootAction) {
+              targetBowShoot = atkEnv;
             }
           } else if (activeAttackKind === 'fists_left') {
             if (glbState.attackLeftAction) {
@@ -3369,6 +3817,11 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         if (glbState.wAxeSwing < 0.001 && targetAxeSwing === 0) glbState.wAxeSwing = 0;
         glbState.wPickaxeSwing += (targetPickaxeSwing - glbState.wPickaxeSwing) * attackAlpha;
         if (glbState.wPickaxeSwing < 0.001 && targetPickaxeSwing === 0) glbState.wPickaxeSwing = 0;
+        const prevBowWeight = glbState.wBowShoot ?? 0;
+        let nextBowWeight = prevBowWeight + (targetBowShoot - prevBowWeight) * attackAlpha;
+        if (nextBowWeight < 0.001 && targetBowShoot === 0) nextBowWeight = 0;
+        glbState.wBowShoot = nextBowWeight;
+        leftBow.setAimBlend(nextBowWeight * 1.4);
 
         // Overhand bottle-throw envelope (~0.08s ramp-in, 0.16s follow-through blend-out)
         let targetThrow = 0;
@@ -3381,7 +3834,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         glbState.wThrow += (targetThrow - glbState.wThrow) * throwAlpha;
         if (glbState.wThrow < 0.001 && targetThrow === 0) glbState.wThrow = 0;
 
-        // Exact upper-body / lower-body split masking so moving swings/punches/throws stride with zero foot-sliding
+        // Exact upper-body / lower-body split masking so moving swings/punches/bow-shots/throws stride cleanly
         const rawJumpSum = glbState.wJumpStart + glbState.wJumpAir + glbState.wJumpLand;
         const invJump = rawJumpSum > 1 ? 1 / rawJumpSum : 1;
         const effJumpStart = glbState.wJumpStart * invJump;
@@ -3394,17 +3847,19 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         let cLeft = glbState.wAttackLeft * airSuppress;
         let cAxe = glbState.wAxeSwing * airSuppress;
         let cPickaxe = glbState.wPickaxeSwing * airSuppress;
+        let cBow = nextBowWeight * airSuppress;
         let cThrow = glbState.wThrow * airSuppress;
-        const rawCombatSum = cRight + cLeft + cAxe + cPickaxe + cThrow;
+        const rawCombatSum = cRight + cLeft + cAxe + cPickaxe + cBow + cThrow;
         if (rawCombatSum > airSuppress && rawCombatSum > 1e-6) {
           const combatNorm = airSuppress / rawCombatSum;
           cRight *= combatNorm;
           cLeft *= combatNorm;
           cAxe *= combatNorm;
           cPickaxe *= combatNorm;
+          cBow *= combatNorm;
           cThrow *= combatNorm;
         }
-        const combatSum = cRight + cLeft + cAxe + cPickaxe + cThrow;
+        const combatSum = cRight + cLeft + cAxe + cPickaxe + cBow + cThrow;
 
         const hasLowerLoco =
           glbState.idleLowerAction !== null || glbState.walkLowerAction !== null;
@@ -3413,6 +3868,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         const leftMask = glbState.attackLeftUpperAction ? moveMask : 0;
         const axeMask = glbState.axeSwingUpperAction ? moveMask : 0;
         const pickaxeMask = glbState.pickaxeSwingUpperAction ? moveMask : 0;
+        const bowMask = glbState.bowShootUpperAction ? moveMask : 0;
         const throwMask = glbState.throwUpperAction ? moveMask : 0;
 
         const fullLocoScale = Math.max(0, 1 - jumpSum - combatSum);
@@ -3421,6 +3877,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
           cLeft * leftMask +
           cAxe * axeMask +
           cPickaxe * pickaxeMask +
+          cBow * bowMask +
           cThrow * throwMask;
 
         if (glbState.idleAction) {
@@ -3513,6 +3970,12 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         if (glbState.pickaxeSwingUpperAction) {
           glbState.pickaxeSwingUpperAction.setEffectiveWeight(cPickaxe * pickaxeMask);
         }
+        if (glbState.bowShootAction) {
+          glbState.bowShootAction.setEffectiveWeight(cBow * (1 - bowMask));
+        }
+        if (glbState.bowShootUpperAction) {
+          glbState.bowShootUpperAction.setEffectiveWeight(cBow * bowMask);
+        }
         if (glbState.throwAction) {
           glbState.throwAction.setEffectiveWeight(cThrow * (1 - throwMask));
         }
@@ -3554,7 +4017,11 @@ export function createPlayerController(options: PlayerControllerOptions): Player
           ? AXE_ATTACK_DURATION
           : activeAttackKind === 'pickaxe'
             ? PICKAXE_ATTACK_DURATION
-            : ATTACK_DURATION;
+            : activeAttackKind === 'hammer'
+              ? 0.72
+              : activeAttackKind === 'bow'
+                ? 0.9
+                : ATTACK_DURATION;
       const attackPhase = attackTimer > 0 ? clamp(attackElapsed / currentAttackDuration, 0, 1) : 0;
       const attackSlash =
         attackTimer > 0 ? Math.sin(clamp((attackPhase - 0.12) / 0.55, 0, 1) * Math.PI) : 0;
@@ -3652,13 +4119,18 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         rig.rightForearm.rotation.x = 0.62 - attackSlash * 0.28;
         rig.rightForearm.rotation.z = 0;
         rig.axePivot.rotation.set(1.38 - attackSlash * 0.24, 0.22, -0.42 + attackSlash * 0.65);
-      } else if (attackTimer > 0 && activeAttackKind === 'pickaxe') {
-        // High overhead mining pickaxe windup driving straight downward into granite outcrop
+      } else if (attackTimer > 0 && (activeAttackKind === 'pickaxe' || activeAttackKind === 'hammer')) {
+        // High overhead pickaxe / repair hammer strike driving downward
         rig.rightArm.rotation.x = 2.48 - attackSlash * 2.92;
         rig.rightArm.rotation.z = 0.24 - attackSlash * 0.18;
         rig.rightForearm.rotation.x = 0.85 - attackSlash * 0.58;
         rig.rightForearm.rotation.z = 0;
         rig.axePivot.rotation.set(1.05 + attackSlash * 0.48, 0.04, 0.08);
+      } else if (attackTimer > 0 && activeAttackKind === 'bow') {
+        rig.leftArm.rotation.x = 1.48;
+        rig.leftForearm.rotation.x = 0.12;
+        rig.rightArm.rotation.x = 1.38 - attackSlash * 0.35;
+        rig.rightForearm.rotation.x = 1.15 - attackSlash * 0.4;
       } else if (attackTimer > 0 && !isLeftPunch) {
         rig.rightArm.rotation.x = 1.65 - attackSlash * 2.15;
         rig.rightArm.rotation.z = 0.35 - attackSlash * 0.65;
@@ -3700,9 +4172,10 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       window.removeEventListener('blur', handleBlur);
       document.removeEventListener('pointerlockchange', handlePointerLockChange);
       scene.remove(root);
-      // Dispose chest flashlight & hand tools once after detaching so GLB/procedural cleanup never double-disposes them
+      // Dispose chest flashlight, right-hand tools & left-hand bow once after detaching so GLB/procedural cleanup never double-disposes them
       chestFlashlight.dispose();
       handTools.dispose();
+      leftBow.dispose();
       if (glbState) {
         glbState.mixer.stopAllAction();
         glbState.mixer.uncacheRoot(glbState.scene);

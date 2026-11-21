@@ -7,6 +7,7 @@ import {
   BUILD_PIECE_ORDER,
   BUILD_RECIPES,
   createBuildingSystem,
+  MAX_BUILD_PIECES,
   type BuildPieceKind,
 } from './systems/building';
 import {
@@ -36,7 +37,7 @@ import {
   type LootBundle,
   type ResourceCost,
 } from './systems/survival';
-import { createThreatSystem } from './systems/threats';
+import { createThreatSystem, type SiegeStatus } from './systems/threats';
 import { createWildlifeSystem } from './systems/wildlife';
 import { createFrontierEnvironment } from './world/environment';
 import { getRoadFactor, getTerrainHeight, type Obstacle, type Vec2Like } from './world/terrain';
@@ -76,6 +77,7 @@ function formatLootSummary(loot: LootBundle): string {
   if (loot.medkits) parts.push(`+${loot.medkits} Medkit${loot.medkits > 1 ? 's' : ''}`);
   if (loot.warmers) parts.push(`+${loot.warmers} Warmer${loot.warmers > 1 ? 's' : ''}`);
   if (loot.bottles) parts.push(`+${loot.bottles} Bottle${loot.bottles > 1 ? 's' : ''}`);
+  if (loot.arrows) parts.push(`+${loot.arrows} Arrow${loot.arrows > 1 ? 's' : ''}`);
   if (loot.wood) parts.push(`+${loot.wood} Wood`);
   if (loot.stone) parts.push(`+${loot.stone} Stone`);
   if (loot.scrap) parts.push(`+${loot.scrap} Scrap`);
@@ -99,7 +101,7 @@ function formatBuildPieceError(
     return `Need ${formatResourceCost(recipe.cost)} for ${recipe.shortLabel}`;
   }
   if (reason === 'limit') {
-    return 'Max 64 Base Pieces Reached';
+    return `Max ${MAX_BUILD_PIECES} Base Pieces Reached`;
   }
   if (reason === 'puddle') {
     return 'Cannot Build in Standing Water';
@@ -110,19 +112,72 @@ function formatBuildPieceError(
   return 'Clear Ground Needed to Place';
 }
 
-const WORKBENCH_ORDER: readonly CraftItemKind[] = ['ration', 'medkit', 'warmer', 'bottle'];
+const WORKBENCH_ORDER: readonly CraftItemKind[] = [
+  'ration',
+  'medkit',
+  'warmer',
+  'bottle',
+  'arrows',
+  'repair_hammer',
+  'compound_bow',
+  'reinforced_tools',
+  'upgraded_flashlight',
+  'scrap_armor',
+];
+
+const ALL_TOOL_ORDER: readonly EquippedTool[] = ['axe', 'pickaxe', 'fists', 'bow', 'hammer'];
+
+function formatWorkbenchName(kind: CraftItemKind): string {
+  switch (kind) {
+    case 'ration':
+      return 'Field Ration';
+    case 'medkit':
+      return 'Medkit';
+    case 'warmer':
+      return 'Hand Warmer';
+    case 'bottle':
+      return 'Glass Bottle';
+    case 'arrows':
+      return '4x Broadhead Arrows';
+    case 'repair_hammer':
+      return 'Repair Hammer';
+    case 'compound_bow':
+      return 'Compound Bow';
+    case 'reinforced_tools':
+      return 'Reinforced Tools';
+    case 'upgraded_flashlight':
+      return 'Upgraded Flashlight';
+    case 'scrap_armor':
+      return 'Scrap Armor';
+    default: {
+      const exhaustiveCheck: never = kind;
+      return exhaustiveCheck;
+    }
+  }
+}
 
 function formatWorkbenchLabel(kind: CraftItemKind): string {
   const recipe = WORKBENCH_RECIPES[kind];
-  const name =
-    kind === 'ration'
-      ? 'Field Ration'
-      : kind === 'medkit'
-        ? 'Medkit'
-        : kind === 'warmer'
-          ? 'Hand Warmer'
-          : 'Glass Bottle';
-  return `${name} (${formatResourceCost(recipe)})`;
+  return `${formatWorkbenchName(kind)} (${formatResourceCost(recipe)})`;
+}
+
+function formatCraftSuccessToast(kind: CraftItemKind): string {
+  switch (kind) {
+    case 'compound_bow':
+      return 'Crafted Compound Bow · Press [7] to Equip';
+    case 'repair_hammer':
+      return 'Crafted Repair Hammer · Press [8] to Equip';
+    case 'reinforced_tools':
+      return 'Reinforced Steel Tools · 2-Hit Harvest & +50% Melee';
+    case 'upgraded_flashlight':
+      return 'Upgraded Tactical Light · 2x Battery & Wider Beam';
+    case 'scrap_armor':
+      return 'Scrap Armor Equipped · -38% Combat Damage';
+    case 'arrows':
+      return 'Crafted 4x Broadhead Arrows';
+    default:
+      return `Crafted ${formatWorkbenchLabel(kind)}`;
+  }
 }
 
 function formatCampBuildError(
@@ -158,6 +213,8 @@ function startOvergrownFrontier(): void {
   const hudStealth = requireElement<HTMLDivElement>('hud-stealth');
   const hudShelter = requireElement<HTMLDivElement>('hud-shelter');
   const hudFire = requireElement<HTMLDivElement>('hud-fire');
+  const hudArmor = requireElement<HTMLDivElement>('hud-armor');
+  const hudSiege = requireElement<HTMLDivElement>('hud-siege');
   const hudCaches = requireElement<HTMLSpanElement>('hud-caches');
   const hudClock = requireElement<HTMLDivElement>('hud-clock');
   const hudLightLabel = requireElement<HTMLSpanElement>('hud-light-label');
@@ -169,6 +226,7 @@ function startOvergrownFrontier(): void {
   const barLight = requireElement<HTMLDivElement>('bar-light');
 
   const scavengePrompt = requireElement<HTMLDivElement>('scavenge-prompt');
+  const scavengePromptKeycap = scavengePrompt.querySelector('.keycap');
   const scavengePromptLabel = requireElement<HTMLSpanElement>('scavenge-prompt-label');
   const workbenchBar = requireElement<HTMLDivElement>('workbench-bar');
   const workbenchRecipeLabel = requireElement<HTMLSpanElement>('workbench-recipe-label');
@@ -181,6 +239,9 @@ function startOvergrownFrontier(): void {
     requireElement<HTMLDivElement>('build-slot-4'),
     requireElement<HTMLDivElement>('build-slot-5'),
     requireElement<HTMLDivElement>('build-slot-6'),
+    requireElement<HTMLDivElement>('build-slot-7'),
+    requireElement<HTMLDivElement>('build-slot-8'),
+    requireElement<HTMLDivElement>('build-slot-9'),
   ];
   const lootToast = requireElement<HTMLDivElement>('loot-toast');
 
@@ -188,6 +249,7 @@ function startOvergrownFrontier(): void {
   const slotMedkits = requireElement<HTMLDivElement>('slot-medkits');
   const slotWarmers = requireElement<HTMLDivElement>('slot-warmers');
   const slotBottles = requireElement<HTMLDivElement>('slot-bottles');
+  const slotArrows = requireElement<HTMLDivElement>('slot-arrows');
   const slotWood = requireElement<HTMLDivElement>('slot-wood');
   const slotStone = requireElement<HTMLDivElement>('slot-stone');
   const slotScrap = requireElement<HTMLDivElement>('slot-scrap');
@@ -195,6 +257,7 @@ function startOvergrownFrontier(): void {
   const invMedkits = requireElement<HTMLSpanElement>('inv-medkits');
   const invWarmers = requireElement<HTMLSpanElement>('inv-warmers');
   const invBottles = requireElement<HTMLSpanElement>('inv-bottles');
+  const invArrows = requireElement<HTMLSpanElement>('inv-arrows');
   const invWood = requireElement<HTMLSpanElement>('inv-wood');
   const invStone = requireElement<HTMLSpanElement>('inv-stone');
   const invScrap = requireElement<HTMLSpanElement>('inv-scrap');
@@ -202,6 +265,10 @@ function startOvergrownFrontier(): void {
   const toolAxeEl = requireElement<HTMLDivElement>('tool-axe');
   const toolPickaxeEl = requireElement<HTMLDivElement>('tool-pickaxe');
   const toolFistsEl = requireElement<HTMLDivElement>('tool-fists');
+  const toolBowEl = requireElement<HTMLDivElement>('tool-bow');
+  const toolHammerEl = requireElement<HTMLDivElement>('tool-hammer');
+  const toolAxeLabel = requireElement<HTMLSpanElement>('tool-axe-label');
+  const toolPickaxeLabel = requireElement<HTMLSpanElement>('tool-pickaxe-label');
 
   const gameoverOverlay = requireElement<HTMLDivElement>('gameover-overlay');
   const gameoverReason = requireElement<HTMLParagraphElement>('gameover-reason');
@@ -260,9 +327,9 @@ function startOvergrownFrontier(): void {
   });
   engine.scene.add(building.root);
 
-  const getSupportHeight = (x: number, z: number): number => {
+  const getSupportHeight = (x: number, z: number, currentY?: number): number => {
     const terrainY = getTerrainHeight(x, z);
-    const floorY = building.getFloorHeightAt(x, z);
+    const floorY = building.getFloorHeightAt(x, z, currentY);
     return floorY !== null && floorY > terrainY ? floorY : terrainY;
   };
 
@@ -289,6 +356,16 @@ function startOvergrownFrontier(): void {
     toastTimer = 2.6;
   }
 
+  function resolveBaseAnchor(px: number, pz: number, out: Vec2Like): Vec2Like | null {
+    if (building.getBaseAnchor(out)) {
+      return out;
+    }
+    if (camp.getNearestCampfire(px, pz, 120, out)) {
+      return out;
+    }
+    return null;
+  }
+
   const threats = createThreatSystem({
     obstacles: worldObstacles,
     getSupportHeight,
@@ -297,7 +374,7 @@ function startOvergrownFrontier(): void {
         return;
       }
       lastDamageCause = 'raider';
-      survival.applyDamage(damage);
+      survival.applyDamage(damage, 'combat');
       audio.playPlayerHurt();
       player.triggerHitShake(0.85);
       damageFlashAlpha = 0.92;
@@ -326,6 +403,52 @@ function startOvergrownFrontier(): void {
         const targetName = isMonster ? 'Hollow Stalker' : 'Raider';
         showToast(`Spikes Downed ${targetName} · ${formatLootSummary(loot)}`);
         persistWorld();
+      }
+    },
+    onStructureBashed(destroyed, label): void {
+      if (exploring && !survival.vitals.isDead) {
+        audio.playStructureBash(destroyed);
+      }
+      if (destroyed) {
+        showToast(`${label ?? 'Structure'} Breached!`);
+        syncBuildBarUi();
+        persistWorld();
+      }
+    },
+    onSiegeEvent(kind, wave, hostiles, rewardLoot): void {
+      if (exploring && !survival.vitals.isDead) {
+        audio.playSiegeHorn(kind === 'repelled');
+      }
+      if (kind === 'started') {
+        showToast(`Siege Wave ${wave} · ${hostiles} Hostile${hostiles === 1 ? '' : 's'} Inbound!`);
+      } else {
+        if (rewardLoot) {
+          survival.addLoot(rewardLoot);
+          showToast(`Siege Wave ${wave} Repelled! · ${formatLootSummary(rewardLoot)}`);
+        } else {
+          showToast(`Siege Wave ${wave} Repelled!`);
+        }
+        persistWorld();
+      }
+    },
+    onArrowHit(hitEnemy, downed, isMonster, headshot, loot): void {
+      if (exploring && !survival.vitals.isDead) {
+        audio.playArrowImpact(hitEnemy);
+      }
+      if (!hitEnemy) {
+        return;
+      }
+      player.triggerHitShake(downed || headshot ? 0.34 : 0.16);
+      if (downed && loot) {
+        survival.addLoot(loot);
+        const targetName = isMonster ? 'Hollow Stalker' : 'Raider';
+        const prefix = headshot ? `Headshot · ${targetName}` : `Arrow Downed ${targetName}`;
+        showToast(`${prefix} · ${formatLootSummary(loot)}`);
+        persistWorld();
+      } else if (headshot) {
+        showToast(
+          isMonster ? 'Headshot · Hollow Stalker Staggered' : 'Headshot · Raider Wounded',
+        );
       }
     },
   });
@@ -358,6 +481,38 @@ function startOvergrownFrontier(): void {
     }
   }
 
+  function ensureAvailableWorkbenchRecipe(): void {
+    const total = WORKBENCH_ORDER.length;
+    for (let offset = 0; offset < total; offset += 1) {
+      const idx = (workbenchRecipeIdx + offset) % total;
+      const candidate = WORKBENCH_ORDER[idx];
+      if (candidate && !survival.isRecipeOwned(candidate)) {
+        workbenchRecipeIdx = idx;
+        return;
+      }
+    }
+    workbenchRecipeIdx = 0;
+  }
+
+  function advanceWorkbenchRecipe(): CraftItemKind {
+    const total = WORKBENCH_ORDER.length;
+    for (let offset = 1; offset <= total; offset += 1) {
+      const idx = (workbenchRecipeIdx + offset) % total;
+      const candidate = WORKBENCH_ORDER[idx];
+      if (candidate && !survival.isRecipeOwned(candidate)) {
+        workbenchRecipeIdx = idx;
+        return candidate;
+      }
+    }
+    workbenchRecipeIdx = 0;
+    return WORKBENCH_ORDER[0] ?? 'ration';
+  }
+
+  function syncGearSystems(): void {
+    player.setReinforcedTools(survival.gear.reinforcedTools);
+    flashlight.setUpgraded(survival.gear.upgradedFlashlight);
+  }
+
   function syncBuildBarUi(): void {
     const showBuild = building.isActive() && exploring && !survival.vitals.isDead;
     buildBar.classList.toggle('visible', showBuild);
@@ -376,18 +531,41 @@ function startOvergrownFrontier(): void {
   }
 
   function selectTool(nextTool: EquippedTool, announce = false): void {
+    if (nextTool === 'bow' && !survival.gear.hasCompoundBow) {
+      if (announce) {
+        showToast('Craft Compound Bow at Workbench (4W 2St 3Sc)');
+      }
+      return;
+    }
+    if (nextTool === 'hammer' && !survival.gear.hasRepairHammer) {
+      if (announce) {
+        showToast('Craft Repair Hammer at Workbench (2W 1St 1Sc)');
+      }
+      return;
+    }
     equippedTool = nextTool;
     player.setEquippedTool(nextTool);
     toolAxeEl.classList.toggle('active', nextTool === 'axe');
     toolPickaxeEl.classList.toggle('active', nextTool === 'pickaxe');
     toolFistsEl.classList.toggle('active', nextTool === 'fists');
+    toolBowEl.classList.toggle('active', nextTool === 'bow');
+    toolHammerEl.classList.toggle('active', nextTool === 'hammer');
     if (announce) {
+      const reinforced = survival.gear.reinforcedTools;
       const label =
         nextTool === 'axe'
-          ? 'Felling Axe Equipped'
+          ? reinforced
+            ? 'Reinforced Steel Axe Equipped'
+            : 'Felling Axe Equipped'
           : nextTool === 'pickaxe'
-            ? 'Survival Pickaxe Equipped'
-            : 'Bare Fists Equipped';
+            ? reinforced
+              ? 'Reinforced Steel Pickaxe Equipped'
+              : 'Survival Pickaxe Equipped'
+            : nextTool === 'bow'
+              ? 'Compound Bow Equipped'
+              : nextTool === 'hammer'
+                ? 'Repair Hammer Equipped'
+                : 'Bare Fists Equipped';
       showToast(label);
     }
   }
@@ -430,6 +608,8 @@ function startOvergrownFrontier(): void {
     reticle.classList.remove('visible');
     buildBar.classList.remove('visible');
     workbenchBar.classList.remove('visible');
+    hudSiege.classList.remove('visible');
+    prevSiegeVisible = false;
     document.body.classList.remove('build-mode-active');
     player.setInputEnabled(false);
     if (hasEnteredOnce) {
@@ -448,6 +628,8 @@ function startOvergrownFrontier(): void {
     scavengePrompt.classList.remove('visible');
     buildBar.classList.remove('visible');
     workbenchBar.classList.remove('visible');
+    hudSiege.classList.remove('visible');
+    prevSiegeVisible = false;
     document.body.classList.remove('build-mode-active');
 
     if (document.pointerLockElement === canvas) {
@@ -485,6 +667,8 @@ function startOvergrownFrontier(): void {
 
     if (hasCampRespawn) {
       survival.reviveAtCamp();
+      syncGearSystems();
+      ensureAvailableWorkbenchRecipe();
       player.resetToSpawn(scratchCampSpawn.x, scratchCampSpawn.z);
       camp.sampleProximity(player.position.x, player.position.z, scratchCampProx);
       rainField.update(
@@ -506,6 +690,9 @@ function startOvergrownFrontier(): void {
     clearWorldSave();
     hasSavedState = false;
     btnResetWorld.style.display = 'none';
+    workbenchRecipeIdx = 0;
+    prevWorkbenchRecipeKey = '';
+    workbenchRecipeLabel.textContent = formatWorkbenchLabel(WORKBENCH_ORDER[0] ?? 'ration');
     building.reset();
     camp.reset();
     harvest.reset();
@@ -513,6 +700,8 @@ function startOvergrownFrontier(): void {
     wildlife.reset();
     survival.reset();
     scavenge.reset();
+    syncGearSystems();
+    selectTool('axe', false);
     player.resetToSpawn();
     camp.sampleProximity(player.position.x, player.position.z, scratchCampProx);
     rainField.update(
@@ -550,6 +739,7 @@ function startOvergrownFrontier(): void {
     flashlight.reset();
     prevSyncedLightOn = false;
     player.setFlashlightActive(false);
+    syncGearSystems();
     selectTool('axe', false);
     player.resetToSpawn();
     camp.sampleProximity(player.position.x, player.position.z, scratchCampProx);
@@ -585,6 +775,13 @@ function startOvergrownFrontier(): void {
     canCookAtFire: false,
   };
   const scratchCampSpawn: Vec2Like = { x: 0, z: 0 };
+  const scratchBaseAnchor: Vec2Like = { x: 0, z: 0 };
+  const scratchSiegeStatus: SiegeStatus = {
+    active: false,
+    wave: 0,
+    remainingHostiles: 0,
+    cooldownRemaining: 0,
+  };
   const scratchStealthResult: StealthResult = {
     visibility: 1,
     noiseRadius: 0,
@@ -624,6 +821,10 @@ function startOvergrownFrontier(): void {
     getFlashlightExposure: flashlight.getBeamExposure,
     getFireRepel: camp.getCampfireRepelPoint,
     checkSpikeHit: building.checkSpikeHit,
+    baseAnchor: null as Vec2Like | null,
+    findNearestStructure: building.findNearestAttackableStructure,
+    damageStructure: building.damageStructure,
+    checkArrowStructureHit: building.checkArrowStructureHit,
   };
 
   let prevSyncedLightOn = false;
@@ -633,7 +834,8 @@ function startOvergrownFrontier(): void {
     scene: engine.scene,
     canvas,
     obstacles: worldObstacles,
-    isInsidePuddle: (x, z) => environment.isInsidePuddle(x, z) && building.getFloorHeightAt(x, z) === null,
+    isInsidePuddle: (x, z) =>
+      environment.isInsidePuddle(x, z) && building.getFloorHeightAt(x, z, player.position.y) === null,
     getSupportHeight,
     isBuildMode(): boolean {
       return building.isActive();
@@ -649,6 +851,14 @@ function startOvergrownFrontier(): void {
     },
     canThrowBottle(): boolean {
       return exploring && !survival.vitals.isDead && survival.inventory.bottles > 0;
+    },
+    canShootArrow(): boolean {
+      return (
+        exploring &&
+        !survival.vitals.isDead &&
+        survival.gear.hasCompoundBow &&
+        survival.inventory.arrows > 0
+      );
     },
     onFootstep(surface, intensity): void {
       audio.playFootstep(surface, intensity);
@@ -668,7 +878,44 @@ function startOvergrownFrontier(): void {
       audio.playAttackWhoosh();
     },
     onAttackHitWindow(x, z, fwdX, fwdZ): void {
-      const hitResult = threats.tryPlayerMeleeHit(x, z, fwdX, fwdZ, player.isCrouching());
+      // Repair Hammer repairs damaged timber structures first before attempting melee/harvest
+      if (equippedTool === 'hammer') {
+        const repairRes = building.tryRepairStructure(
+          x,
+          player.position.y,
+          z,
+          fwdX,
+          fwdZ,
+          survival,
+        );
+        if (repairRes.ok) {
+          audio.playRepairHammer();
+          player.triggerHitShake(0.2);
+          showToast(
+            `Repaired ${repairRes.label ?? 'Structure'} (${Math.round(repairRes.hp ?? 0)}/${Math.round(repairRes.maxHp ?? 0)} HP)`,
+          );
+          persistWorld();
+          return;
+        }
+        if (repairRes.reason === 'resources') {
+          showToast('Need 1 Wood to Repair');
+          return;
+        }
+      }
+
+      const meleeDamageOverride =
+        (equippedTool === 'axe' || equippedTool === 'pickaxe') && survival.gear.reinforcedTools
+          ? 52
+          : undefined;
+      const hitResult = threats.tryPlayerMeleeHit(
+        x,
+        z,
+        fwdX,
+        fwdZ,
+        player.isCrouching(),
+        meleeDamageOverride,
+        player.position.y,
+      );
       if (!hitResult.stealthTakedown) {
         threats.emitNoise(player.position.x, player.position.z, 7.5);
       }
@@ -692,7 +939,14 @@ function startOvergrownFrontier(): void {
       }
 
       // If no enemy was struck, attempt physical timber/stone harvesting with equipped tool
-      const harvestHit = harvest.tryHarvestHit(x, z, fwdX, fwdZ, equippedTool);
+      const harvestHit = harvest.tryHarvestHit(
+        x,
+        z,
+        fwdX,
+        fwdZ,
+        equippedTool,
+        survival.gear.reinforcedTools,
+      );
       if (!harvestHit.hit) {
         return;
       }
@@ -725,6 +979,24 @@ function startOvergrownFrontier(): void {
         persistWorld();
       }
     },
+    onBowEmpty(): void {
+      if (exploring && !survival.vitals.isDead) {
+        showToast('No Arrows · Craft 4 Arrows at Workbench (1W 1St)');
+      }
+    },
+    onBowRelease(ox, oy, oz, ax, ay, az): void {
+      if (
+        !exploring ||
+        survival.vitals.isDead ||
+        !survival.gear.hasCompoundBow ||
+        !survival.consumeArrow()
+      ) {
+        return;
+      }
+      threats.shootArrow(ox, oy, oz, ax, ay, az);
+      audio.playBowShoot();
+      threats.emitNoise(ox, oz, 3.5);
+    },
     onInteract(): void {
       if (!exploring || survival.vitals.isDead) {
         return;
@@ -753,6 +1025,7 @@ function startOvergrownFrontier(): void {
         player.position.z,
         scratchForward2D.x,
         scratchForward2D.z,
+        player.position.y,
       );
       if (buildTarget) {
         if (buildTarget.kind === 'door') {
@@ -765,10 +1038,14 @@ function startOvergrownFrontier(): void {
           return;
         }
         if (buildTarget.kind === 'workbench') {
+          ensureAvailableWorkbenchRecipe();
           const recipeKind = WORKBENCH_ORDER[workbenchRecipeIdx] ?? 'ration';
           if (survival.craftItem(recipeKind)) {
             audio.playItemUse();
-            showToast(`Crafted ${formatWorkbenchLabel(recipeKind)}`);
+            syncGearSystems();
+            ensureAvailableWorkbenchRecipe();
+            prevWorkbenchRecipeKey = '';
+            showToast(formatCraftSuccessToast(recipeKind));
             persistWorld();
           } else {
             showToast(`Need ${formatResourceCost(WORKBENCH_RECIPES[recipeKind])}`);
@@ -997,14 +1274,48 @@ function startOvergrownFrontier(): void {
       }
       selectTool(tool, true);
     },
+    onCycleTool(): void {
+      if (!exploring || survival.vitals.isDead) {
+        return;
+      }
+      const curIdx = ALL_TOOL_ORDER.indexOf(equippedTool);
+      const startIdx = curIdx >= 0 ? curIdx : 0;
+      for (let step = 1; step <= ALL_TOOL_ORDER.length; step += 1) {
+        const candidate = ALL_TOOL_ORDER[(startIdx + step) % ALL_TOOL_ORDER.length];
+        if (!candidate) {
+          continue;
+        }
+        if (candidate === 'bow' && !survival.gear.hasCompoundBow) {
+          continue;
+        }
+        if (candidate === 'hammer' && !survival.gear.hasRepairHammer) {
+          continue;
+        }
+        if (candidate !== equippedTool) {
+          selectTool(candidate, true);
+        }
+        return;
+      }
+    },
     onCycleWorkbenchRecipe(): void {
       if (!exploring || survival.vitals.isDead) {
         return;
       }
-      workbenchRecipeIdx = (workbenchRecipeIdx + 1) % WORKBENCH_ORDER.length;
-      const recipeKind = WORKBENCH_ORDER[workbenchRecipeIdx] ?? 'ration';
+      const recipeKind = advanceWorkbenchRecipe();
+      prevWorkbenchRecipeKey = recipeKind;
       workbenchRecipeLabel.textContent = formatWorkbenchLabel(recipeKind);
       showToast(`Workbench Recipe · ${formatWorkbenchLabel(recipeKind)}`);
+    },
+    onTriggerSiege(): void {
+      if (!exploring || survival.vitals.isDead) {
+        return;
+      }
+      const anchor = resolveBaseAnchor(player.position.x, player.position.z, scratchBaseAnchor);
+      const ax = anchor ? anchor.x : player.position.x;
+      const az = anchor ? anchor.z : player.position.z;
+      if (!threats.triggerSiegeWave(ax, az)) {
+        showToast('Siege Wave Already Active');
+      }
     },
     onQuickSave(): void {
       if (!exploring || survival.vitals.isDead) {
@@ -1111,6 +1422,13 @@ function startOvergrownFrontier(): void {
   let prevCold = false;
   let prevSheltered = false;
   let prevNearFire = false;
+  let prevScrapArmor = false;
+  let prevHasBow: boolean | null = null;
+  let prevHasHammer: boolean | null = null;
+  let prevReinforcedTools: boolean | null = null;
+  let prevSiegeVisible = false;
+  let prevSiegeWave = -1;
+  let prevSiegeHostiles = -1;
   let prevStealthKey = '';
   let prevPromptId = '';
   let prevLooted = -1;
@@ -1118,6 +1436,7 @@ function startOvergrownFrontier(): void {
   let prevMedkits = -1;
   let prevWarmers = -1;
   let prevBottles = -1;
+  let prevArrows = -1;
   let prevWood = -1;
   let prevStone = -1;
   let prevScrap = -1;
@@ -1134,6 +1453,7 @@ function startOvergrownFrontier(): void {
   function syncSurvivalHud(dt: number): void {
     const v = survival.vitals;
     const inv = survival.inventory;
+    const gear = survival.gear;
 
     const hpPct = Math.round(v.health);
     if (hpPct !== prevHp) {
@@ -1176,6 +1496,43 @@ function startOvergrownFrontier(): void {
     if (scratchCampProx.nearFire !== prevNearFire) {
       prevNearFire = scratchCampProx.nearFire;
       hudFire.classList.toggle('visible', scratchCampProx.nearFire);
+    }
+
+    if (gear.scrapArmor !== prevScrapArmor) {
+      prevScrapArmor = gear.scrapArmor;
+      hudArmor.classList.toggle('visible', gear.scrapArmor);
+    }
+
+    if (gear.hasCompoundBow !== prevHasBow) {
+      prevHasBow = gear.hasCompoundBow;
+      toolBowEl.classList.toggle('locked', !gear.hasCompoundBow);
+    }
+    if (gear.hasRepairHammer !== prevHasHammer) {
+      prevHasHammer = gear.hasRepairHammer;
+      toolHammerEl.classList.toggle('locked', !gear.hasRepairHammer);
+    }
+    if (gear.reinforcedTools !== prevReinforcedTools) {
+      prevReinforcedTools = gear.reinforcedTools;
+      toolAxeLabel.textContent = gear.reinforcedTools ? 'Steel Axe' : 'Axe';
+      toolPickaxeLabel.textContent = gear.reinforcedTools ? 'Steel Pick' : 'Pickaxe';
+    }
+
+    threats.getSiegeStatus(scratchSiegeStatus);
+    const showSiege = scratchSiegeStatus.active && exploring && !v.isDead;
+    if (
+      showSiege !== prevSiegeVisible ||
+      (showSiege &&
+        (scratchSiegeStatus.wave !== prevSiegeWave ||
+          scratchSiegeStatus.remainingHostiles !== prevSiegeHostiles))
+    ) {
+      prevSiegeVisible = showSiege;
+      prevSiegeWave = scratchSiegeStatus.wave;
+      prevSiegeHostiles = scratchSiegeStatus.remainingHostiles;
+      hudSiege.classList.toggle('visible', showSiege);
+      if (showSiege) {
+        const hostiles = scratchSiegeStatus.remainingHostiles;
+        hudSiege.textContent = `SIEGE WAVE ${scratchSiegeStatus.wave} · ${hostiles} HOSTILE${hostiles === 1 ? '' : 'S'}`;
+      }
     }
 
     const alertState = threats.getAlertState();
@@ -1225,6 +1582,11 @@ function startOvergrownFrontier(): void {
       prevBottles = inv.bottles;
       invBottles.textContent = String(inv.bottles);
       slotBottles.classList.toggle('empty', inv.bottles <= 0);
+    }
+    if (inv.arrows !== prevArrows) {
+      prevArrows = inv.arrows;
+      invArrows.textContent = String(inv.arrows);
+      slotArrows.classList.toggle('empty', inv.arrows <= 0);
     }
     let buildResourcesChanged = false;
     if (inv.wood !== prevWood) {
@@ -1285,7 +1647,7 @@ function startOvergrownFrontier(): void {
       barLight.classList.toggle('low', lightLow);
     }
 
-    // Contextual [E] scavenge / door / workbench / storage / campfire cooking prompt
+    // Contextual [E] scavenge / door / workbench / storage / damaged-structure repair / campfire cooking prompt
     player.getForwardXZ(scratchForward2D);
     const promptTarget =
       exploring && !v.isDead
@@ -1303,9 +1665,23 @@ function startOvergrownFrontier(): void {
             player.position.z,
             scratchForward2D.x,
             scratchForward2D.z,
+            player.position.y,
+          )
+        : null;
+    const repairTarget =
+      !promptTarget && !buildInteractTarget && exploring && !v.isDead
+        ? building.getRepairTarget(
+            player.position.x,
+            player.position.y,
+            player.position.z,
+            scratchForward2D.x,
+            scratchForward2D.z,
           )
         : null;
     const showWorkbenchStrip = buildInteractTarget?.kind === 'workbench';
+    if (showWorkbenchStrip) {
+      ensureAvailableWorkbenchRecipe();
+    }
     const activeWorkbenchRecipe = WORKBENCH_ORDER[workbenchRecipeIdx] ?? 'ration';
     if (showWorkbenchStrip !== prevWorkbenchOpen) {
       prevWorkbenchOpen = showWorkbenchStrip;
@@ -1326,24 +1702,49 @@ function startOvergrownFrontier(): void {
           : buildInteractTarget.kind === 'workbench'
             ? `wb_${activeWorkbenchRecipe}`
             : buildInteractTarget.id;
+    } else if (repairTarget) {
+      const repairMode = !gear.hasRepairHammer
+        ? 'locked'
+        : equippedTool === 'hammer'
+          ? 'ready'
+          : 'equip';
+      nextPromptId = `rep_${repairTarget.id}_${Math.round(repairTarget.hp)}_${repairMode}`;
     } else if (exploring && !v.isDead && scratchCampProx.canCookAtFire) {
       nextPromptId = inv.scrap >= 1 ? 'camp_cook_ready' : 'camp_cook_empty';
     }
     if (nextPromptId !== prevPromptId) {
       prevPromptId = nextPromptId;
       if (promptTarget) {
+        if (scavengePromptKeycap) scavengePromptKeycap.textContent = 'E';
         scavengePromptLabel.textContent = `Search ${promptTarget.label}`;
         scavengePrompt.classList.add('visible');
       } else if (buildInteractTarget) {
+        if (scavengePromptKeycap) scavengePromptKeycap.textContent = 'E';
         scavengePromptLabel.textContent =
           buildInteractTarget.kind === 'workbench'
             ? `Craft ${formatWorkbenchLabel(activeWorkbenchRecipe)}`
             : buildInteractTarget.label;
         scavengePrompt.classList.add('visible');
+      } else if (repairTarget) {
+        const hpInt = Math.round(repairTarget.hp);
+        const maxHpInt = Math.round(repairTarget.maxHp);
+        if (!gear.hasRepairHammer) {
+          if (scavengePromptKeycap) scavengePromptKeycap.textContent = '8';
+          scavengePromptLabel.textContent = `${repairTarget.label} · ${hpInt}/${maxHpInt} HP · Craft Repair Hammer at Workbench`;
+        } else if (equippedTool === 'hammer') {
+          if (scavengePromptKeycap) scavengePromptKeycap.textContent = 'F';
+          scavengePromptLabel.textContent = `${repairTarget.label} · ${hpInt}/${maxHpInt} HP · Swing Hammer to Repair (1W)`;
+        } else {
+          if (scavengePromptKeycap) scavengePromptKeycap.textContent = '8';
+          scavengePromptLabel.textContent = `${repairTarget.label} · ${hpInt}/${maxHpInt} HP · Equip Hammer [8] to Repair (1W)`;
+        }
+        scavengePrompt.classList.add('visible');
       } else if (nextPromptId === 'camp_cook_ready') {
+        if (scavengePromptKeycap) scavengePromptKeycap.textContent = 'E';
         scavengePromptLabel.textContent = 'Cook Warm Ration (1 Scrap)';
         scavengePrompt.classList.add('visible');
       } else if (nextPromptId === 'camp_cook_empty') {
+        if (scavengePromptKeycap) scavengePromptKeycap.textContent = 'E';
         scavengePromptLabel.textContent = 'Campfire · Need 1 Scrap to Cook';
         scavengePrompt.classList.add('visible');
       } else {
@@ -1408,11 +1809,12 @@ function startOvergrownFrontier(): void {
       const py = player.position.y;
       const pz = player.position.z;
       camp.sampleProximity(px, pz, scratchCampProx);
-      const inPuddle = environment.isInsidePuddle(px, pz) && building.getFloorHeightAt(px, pz) === null;
+      const inPuddle =
+        environment.isInsidePuddle(px, pz) && building.getFloorHeightAt(px, pz, py) === null;
       const sheltered =
         isInsideShelter(px, pz) ||
         scratchCampProx.inCampShelter ||
-        building.isInsideBuiltShelter(px, pz);
+        building.isInsideBuiltShelter(px, pz, py);
       const roadFactor = getRoadFactor(px, pz);
       const isMoving = player.isMoving();
       const isSprinting = player.isSprinting();
@@ -1506,6 +1908,7 @@ function startOvergrownFrontier(): void {
       scratchThreatInput.nightFactor = atmo.nightFactor;
       scratchThreatInput.rainIntensity = atmo.rainIntensity;
       scratchThreatInput.flashlightOn = lightOn;
+      scratchThreatInput.baseAnchor = resolveBaseAnchor(px, pz, scratchBaseAnchor);
       threats.update(FIXED_STEP, elapsed, scratchThreatInput);
 
       wildlife.update(
@@ -1571,6 +1974,8 @@ function startOvergrownFrontier(): void {
     btnExplore.textContent = 'Continue Saved World';
     btnResetWorld.style.display = 'inline-block';
   }
+  syncGearSystems();
+  ensureAvailableWorkbenchRecipe();
   selectTool('axe', false);
 
   player.update(FIXED_STEP, 0);

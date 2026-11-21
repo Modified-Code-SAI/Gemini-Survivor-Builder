@@ -15,6 +15,8 @@ export interface ObstacleCircle {
   readonly x: number;
   readonly z: number;
   readonly radius: number;
+  readonly minY?: number;
+  readonly maxY?: number;
 }
 
 export interface ObstacleBox {
@@ -23,6 +25,8 @@ export interface ObstacleBox {
   readonly maxX: number;
   readonly minZ: number;
   readonly maxZ: number;
+  readonly minY?: number;
+  readonly maxY?: number;
 }
 
 export interface ObstacleObb {
@@ -33,6 +37,8 @@ export interface ObstacleObb {
   readonly halfDepth: number;
   readonly cos: number;
   readonly sin: number;
+  readonly minY?: number;
+  readonly maxY?: number;
 }
 
 export type Obstacle = ObstacleCircle | ObstacleBox | ObstacleObb;
@@ -202,20 +208,35 @@ export function clampToWorldBounds(
 /**
  * Resolves horizontal circle-vs-obstacle collisions in-place with zero allocations.
  * Runs two passes so corner overlaps between adjacent obstacles settle cleanly.
+ * When `actorY` is supplied, obstacles with optional `minY`/`maxY` vertical bands
+ * only collide if they overlap the actor span `[actorY + 0.16, actorY + actorHeight]`.
  */
 export function resolveHorizontalCollision(
   pos: Vec2Like,
   actorRadius: number,
   obstacles: readonly Obstacle[],
+  actorY?: number,
+  actorHeight = 1.72,
   bounds: WorldBounds = WORLD_BOUNDS,
 ): boolean {
   let collided = false;
+  const actorMinY = actorY !== undefined ? actorY + 0.16 : 0;
+  const actorMaxY = actorY !== undefined ? actorY + actorHeight : 0;
 
   for (let pass = 0; pass < 2; pass += 1) {
     for (let i = 0; i < obstacles.length; i += 1) {
       const obs = obstacles[i];
       if (!obs) {
         continue;
+      }
+
+      if (actorY !== undefined && (obs.minY !== undefined || obs.maxY !== undefined)) {
+        if (
+          (obs.maxY !== undefined && actorMinY >= obs.maxY) ||
+          (obs.minY !== undefined && actorMaxY <= obs.minY)
+        ) {
+          continue;
+        }
       }
 
       if (obs.kind === 'circle') {
@@ -329,6 +350,8 @@ export function createObbObstacle(
   width: number,
   depth: number,
   rotationY: number,
+  minY?: number,
+  maxY?: number,
 ): ObstacleObb {
   return {
     kind: 'obb',
@@ -338,5 +361,7 @@ export function createObbObstacle(
     halfDepth: depth * 0.5,
     cos: Math.cos(rotationY),
     sin: Math.sin(rotationY),
+    minY,
+    maxY,
   };
 }

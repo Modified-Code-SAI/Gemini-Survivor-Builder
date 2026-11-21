@@ -240,6 +240,50 @@
         display: flex;
         justify-content: space-between;
         align-items: flex-start;
+        position: relative;
+      }
+
+      #hud-siege {
+        position: fixed;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%) translateY(-6px);
+        padding: 7px 16px;
+        border-radius: 3px;
+        border: 1px solid rgba(235, 108, 72, 0.78);
+        background: linear-gradient(180deg, rgba(84, 24, 18, 0.82), rgba(44, 14, 11, 0.86));
+        color: #ffdfd0;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        backdrop-filter: blur(6px);
+        box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55);
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+        transition: opacity 0.22s ease, transform 0.22s ease, visibility 0.22s ease;
+        z-index: 8;
+        white-space: nowrap;
+      }
+
+      #hud-siege.visible {
+        opacity: 1;
+        visibility: visible;
+        transform: translateX(-50%) translateY(0);
+        animation: siegePulse 1.8s ease-in-out infinite;
+      }
+
+      @keyframes siegePulse {
+        0%,
+        100% {
+          border-color: rgba(235, 108, 72, 0.72);
+          box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55), 0 0 12px rgba(217, 94, 62, 0.22);
+        }
+        50% {
+          border-color: rgba(247, 174, 96, 0.96);
+          box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55), 0 0 20px rgba(238, 128, 70, 0.52);
+        }
       }
 
       .hud-location {
@@ -396,7 +440,8 @@
       .stance-badge,
       .stealth-badge,
       .shelter-badge,
-      .fire-badge {
+      .fire-badge,
+      .armor-badge {
         padding: 3px 7px;
         border-radius: 2px;
         font-size: 10px;
@@ -445,6 +490,17 @@
       }
 
       .fire-badge.visible {
+        display: inline-block;
+      }
+
+      .armor-badge {
+        display: none;
+        border-color: rgba(146, 186, 212, 0.68);
+        background: rgba(34, 52, 66, 0.72);
+        color: #d6eaf8;
+      }
+
+      .armor-badge.visible {
         display: inline-block;
       }
 
@@ -560,6 +616,12 @@
         color: #fff2d6;
       }
 
+      .tool-slot.locked {
+        opacity: 0.42;
+        border-style: dashed;
+        border-color: rgba(214, 185, 134, 0.22);
+      }
+
       .supply-slot.empty {
         opacity: 0.42;
       }
@@ -579,7 +641,7 @@
         flex-direction: column;
         align-items: center;
         gap: 6px;
-        padding: 9px 12px;
+        padding: 8px 10px;
         background: rgba(10, 16, 12, 0.78);
         border: 1px solid rgba(114, 212, 146, 0.45);
         border-radius: 4px;
@@ -590,7 +652,7 @@
         visibility: hidden;
         transition: opacity 0.18s ease, transform 0.18s ease, visibility 0.18s ease;
         z-index: 8;
-        max-width: 94vw;
+        max-width: 96vw;
       }
 
       #build-bar.visible {
@@ -603,7 +665,7 @@
         display: flex;
         flex-wrap: wrap;
         justify-content: center;
-        gap: 6px;
+        gap: 5px;
       }
 
       .build-slot {
@@ -611,11 +673,11 @@
         flex-direction: column;
         align-items: flex-start;
         gap: 2px;
-        padding: 5px 8px;
+        padding: 4px 7px;
         border-radius: 3px;
         border: 1px solid rgba(214, 185, 134, 0.22);
         background: rgba(20, 28, 22, 0.62);
-        min-width: 96px;
+        min-width: 78px;
       }
 
       .build-slot.selected {
@@ -810,17 +872,18 @@
             <span class="key-hint"><span class="keycap">Shift</span> Run</span>
             <span class="key-hint"><span class="keycap">C</span> Crouch</span>
             <span class="key-hint"><span class="keycap">Space</span> Jump</span>
-            <span class="key-hint"><span class="keycap">Click / F</span> Swing / Harvest</span>
-            <span class="key-hint"><span class="keycap">4–6 / Q</span> Tools</span>
+            <span class="key-hint"><span class="keycap">Click / F</span> Swing / Harvest / Shoot</span>
+            <span class="key-hint"><span class="keycap">4–8 / Q</span> Tools</span>
             <span class="key-hint"><span class="keycap">Tab</span> Build Mode</span>
             <span class="key-hint"><span class="keycap">E</span> Interact</span>
             <span class="key-hint"><span class="keycap">G</span> Bottle</span>
             <span class="key-hint"><span class="keycap">L</span> Light</span>
             <span class="key-hint"><span class="keycap">B / V</span> Camp</span>
+            <span class="key-hint"><span class="keycap">N</span> Siege</span>
             <span class="key-hint"><span class="keycap">F5</span> Save</span>
             <span class="key-hint"><span class="keycap">Esc</span> Pause</span>
           </div>
-          <div>Modular Survival Builder · Phase 1</div>
+          <div>Base Sieges &amp; Fortification · Phase 2</div>
         </div>
       </div>
 
@@ -839,6 +902,8 @@
           </div>
         </div>
 
+        <div id="hud-siege" aria-live="polite">SIEGE WAVE 1 · 3 HOSTILES</div>
+
         <div class="hud-center-prompts">
           <div id="loot-toast" aria-live="polite"></div>
           <div id="workbench-bar">
@@ -855,31 +920,43 @@
         <div id="build-bar">
           <div class="build-bar-pieces">
             <div id="build-slot-0" class="build-slot selected">
-              <span class="build-slot-name"><span class="keycap">1</span> Foundation</span>
-              <span class="build-slot-cost">4 Wood · 1 Stone</span>
+              <span class="build-slot-name"><span class="keycap">1</span> Found</span>
+              <span class="build-slot-cost">4W · 1St</span>
             </div>
             <div id="build-slot-1" class="build-slot">
               <span class="build-slot-name"><span class="keycap">2</span> Wall</span>
-              <span class="build-slot-cost">3 Wood</span>
+              <span class="build-slot-cost">3W</span>
             </div>
             <div id="build-slot-2" class="build-slot">
-              <span class="build-slot-name"><span class="keycap">3</span> Doorway</span>
-              <span class="build-slot-cost">3 Wood · 1 Scrap</span>
+              <span class="build-slot-name"><span class="keycap">3</span> Window</span>
+              <span class="build-slot-cost">3W</span>
             </div>
             <div id="build-slot-3" class="build-slot">
-              <span class="build-slot-name"><span class="keycap">4</span> Roof</span>
-              <span class="build-slot-cost">3 Wood</span>
+              <span class="build-slot-name"><span class="keycap">4</span> Door</span>
+              <span class="build-slot-cost">3W · 1Sc</span>
             </div>
             <div id="build-slot-4" class="build-slot">
-              <span class="build-slot-name"><span class="keycap">5</span> Spikes</span>
-              <span class="build-slot-cost">2 Wood · 1 Scrap</span>
+              <span class="build-slot-name"><span class="keycap">5</span> Roof</span>
+              <span class="build-slot-cost">3W</span>
             </div>
             <div id="build-slot-5" class="build-slot">
-              <span class="build-slot-name"><span class="keycap">6</span> Storage</span>
-              <span class="build-slot-cost">3 Wood · 1 Scrap</span>
+              <span class="build-slot-name"><span class="keycap">6</span> Stairs</span>
+              <span class="build-slot-cost">4W · 1St</span>
             </div>
             <div id="build-slot-6" class="build-slot">
-              <span class="build-slot-name"><span class="keycap">7</span> Workbench</span>
+              <span class="build-slot-name"><span class="keycap">7</span> Upper</span>
+              <span class="build-slot-cost">3W · 1St</span>
+            </div>
+            <div id="build-slot-7" class="build-slot">
+              <span class="build-slot-name"><span class="keycap">8</span> Spikes</span>
+              <span class="build-slot-cost">2W · 1Sc</span>
+            </div>
+            <div id="build-slot-8" class="build-slot">
+              <span class="build-slot-name"><span class="keycap">9</span> Crate</span>
+              <span class="build-slot-cost">3W · 1Sc</span>
+            </div>
+            <div id="build-slot-9" class="build-slot">
+              <span class="build-slot-name"><span class="keycap">0</span> Bench</span>
               <span class="build-slot-cost">4W · 2St · 2Sc</span>
             </div>
           </div>
@@ -887,7 +964,7 @@
             <span><span class="keycap">Click</span> Place</span>
             <span><span class="keycap">R</span> Rotate</span>
             <span><span class="keycap">X</span> Dismantle (50%)</span>
-            <span><span class="keycap">1–7 / Scroll</span> Piece</span>
+            <span><span class="keycap">1–0 / Scroll</span> Piece</span>
             <span><span class="keycap">Tab</span> Exit Build</span>
           </div>
         </div>
@@ -899,6 +976,7 @@
               <div id="hud-stealth" class="stealth-badge">Exposed</div>
               <div id="hud-shelter" class="shelter-badge">Sheltered</div>
               <div id="hud-fire" class="fire-badge">By Fire</div>
+              <div id="hud-armor" class="armor-badge">Armored</div>
             </div>
             <div class="vital-row">
               <span class="vital-label">HP</span>
@@ -936,6 +1014,9 @@
               <div id="slot-bottles" class="supply-slot empty">
                 <span class="keycap">G</span> Bottle <span id="inv-bottles" class="supply-count">0</span>
               </div>
+              <div id="slot-arrows" class="supply-slot empty">
+                Arrows <span id="inv-arrows" class="supply-count">0</span>
+              </div>
               <div id="slot-wood" class="supply-slot empty">
                 Wood <span id="inv-wood" class="supply-count">0</span>
               </div>
@@ -947,9 +1028,15 @@
               </div>
             </div>
             <div class="tool-belt">
-              <div id="tool-axe" class="tool-slot active"><span class="keycap">4</span> Axe</div>
-              <div id="tool-pickaxe" class="tool-slot"><span class="keycap">5</span> Pickaxe</div>
+              <div id="tool-axe" class="tool-slot active">
+                <span class="keycap">4</span> <span id="tool-axe-label">Axe</span>
+              </div>
+              <div id="tool-pickaxe" class="tool-slot">
+                <span class="keycap">5</span> <span id="tool-pickaxe-label">Pickaxe</span>
+              </div>
               <div id="tool-fists" class="tool-slot"><span class="keycap">6</span> Fists</div>
+              <div id="tool-bow" class="tool-slot locked"><span class="keycap">7</span> Bow</div>
+              <div id="tool-hammer" class="tool-slot locked"><span class="keycap">8</span> Hammer</div>
               <div class="tool-slot"><span class="keycap">Tab</span> Build</div>
             </div>
           </div>
@@ -959,12 +1046,13 @@
             <span class="key-hint"><span class="keycap">Shift</span> Run</span>
             <span class="key-hint"><span class="keycap">C</span> Crouch</span>
             <span class="key-hint"><span class="keycap">Click/F</span> Harvest/Hit</span>
+            <span class="key-hint"><span class="keycap">7/8</span> Bow/Hammer</span>
             <span class="key-hint"><span class="keycap">Q</span> Tool</span>
             <span class="key-hint"><span class="keycap">Tab</span> Build</span>
             <span class="key-hint"><span class="keycap">E</span> Interact</span>
             <span class="key-hint"><span class="keycap">L</span> Light</span>
-            <span class="key-hint"><span class="keycap">B</span> Fire(2)</span>
-            <span class="key-hint"><span class="keycap">V</span> Shelter(4)</span>
+            <span class="key-hint"><span class="keycap">B/V</span> Camp</span>
+            <span class="key-hint"><span class="keycap">N</span> Siege</span>
             <span class="key-hint"><span class="keycap">F5</span> Save</span>
             <span class="key-hint"><span class="keycap">T/Y</span> Sky</span>
           </div>
