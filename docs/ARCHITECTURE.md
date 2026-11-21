@@ -30,21 +30,22 @@
 | `src/world/terrain.ts` | Deterministic highway spline (`getRoadCenterX`, `getRoadFactor`, `getRoadBaseHeight`), valley relief heightfield (`getTerrainHeight`), `WORLD_BOUNDS`, `SPAWN_POINT`, `createObbObstacle`, and zero-allocation 2-pass `resolveHorizontalCollision` (circles, AABBs, OBBs). |
 | `src/world/terrain.test.ts` | 9 unit tests validating terrain determinism, road curve, bounds clamping, and circle/box/OBB collision math. |
 | `src/world/textures.ts` | Singleton `getWorldTextureAtlas()` loading 10 real photographic `.jpg` sources (`public/textures/`) into procedural PBR `CanvasTexture` triplets (`map`, `normalMap`, `roughnessMap`) plus alpha-cutout foliage textures (`pineBough`, `ivyCurtain`, `fernFrond`). Owned centrally — never double-disposed by systems. |
-| `src/world/assetLoader.ts` | Optional `GLTFLoader` pipeline with `DEFAULT_GLB_SLOT_MANIFEST` slot mapping (`survivor`, `raider`, `hollow_stalker`, `overgrown_van`, `abandoned_sedan`) and `collectMaterialTextures` cleanup helper. |
-| `src/world/environment.ts` | Reclaimed Highway 9 environment: cracked asphalt road, 7 rainwater puddles (2 foreground real-time `Reflector` planar mirrors + 5 distant Fresnel puddles) all synced to `AtmosphereSnapshot`, Left Bunker & Gas Station concrete ruins, 5 rusted vehicles (GLB-upgradable with swaying ivy curtains), utility poles, 5-species Pacific Northwest forest (`HERO_TREE_COORDS`, exported `createDouglasFirCanopyGeometry()`, `2.8 m` harvest-node exclusion), ferns, boulders, mist cards, and spatial ruin metal-creak anchors. |
+| `src/world/assetLoader.ts` | Optional `GLTFLoader` pipeline with `DEFAULT_GLB_SLOT_MANIFEST` slot mapping (`survivor`, `raider`, `hollow_stalker`, `overgrown_van`, `abandoned_sedan`, `felling_axe`, `pickaxe`, `whitetail_deer`, `pacific_raven`) and `collectMaterialTextures` cleanup helper. |
+| `src/world/environment.ts` | Reclaimed Highway 9 environment: cracked asphalt road, 7 rainwater puddles (2 foreground real-time `Reflector` planar mirrors + 5 distant Fresnel puddles) all synced to `AtmosphereSnapshot`, Left Bunker & Gas Station concrete ruins, 5 rusted vehicles (GLB-upgradable with swaying ivy curtains & GTAO-excluded fallback glass), utility poles (GTAO-excluded wire spans), 5-species Pacific Northwest forest with `ChoppableForestController` (`forest` — every playable tree inside `\|x\| <= 54, z in [-88, 34]` choppable directly out of GPU `InstancedMesh` batches with per-hit shake, 4-slot `YXZ` topple pool, and instanced cut stumps `r in [0.28, 0.42] < 0.55`), ferns, boulders, mist cards, and spatial ruin metal-creak anchors. |
 
 ### Player (`src/player/`)
 
 | File | Responsibility |
 | --- | --- |
-| `src/player/controller.ts` | Over-the-shoulder camera with collision probing & hit trauma shake, 34-bone `survivor.glb` MoCap mixer (speed-matched `walk`/`jog`/`run`/`crouch`, 3-phase `jump_start`/`jump_air`/`jump_land`, load-time upper/lower-body split-masked punches & bottle throws), physical chest-strap angled tactical flashlight (`spine_03` mount + turn-with-light body alignment), switchable right-hand 3D Felling Axe / Pickaxe (`hand_R` mount), `getSupportHeight` foundation walking, Build Mode & tool keybinds, and Chrome pointer-lock hardening (`wasPointerLocked` + drag-to-look + unlocked click/F/Enter build placement). |
+| `src/player/controller.ts` | Over-the-shoulder camera with collision probing & hit trauma shake, 34-bone `survivor.glb` 17-clip MoCap mixer (speed-matched `walk`/`jog`/`run`/`crouch`, 3-phase `jump_start`/`jump_air`/`jump_land`, load-time upper/lower-body split-masked `axe_swing`, `pickaxe_swing`, bare-fist punches, and bottle throws with strict tool-vs-fist routing), physical chest-strap angled tactical flashlight (`spine_03` mount + turn-with-light body alignment), async-loaded sculpted PBR `felling_axe.glb` & `pickaxe.glb` mounted upright on `hand_R` via calibrated `HAND_TOOL_GRIP_QUATERNION`, `getSupportHeight` foundation walking, Build Mode & tool keybinds, and Chrome pointer-lock hardening (`wasPointerLocked` + drag-to-look + unlocked click/F/Enter build placement). |
+| `src/player/controller.test.ts` | 2 unit tests validating `resolveAttackClipKind` tool-vs-fist swing routing and unit-length `HAND_TOOL_GRIP_QUATERNION` / `HAND_TOOL_GRIP_OFFSET` invariants. |
 
 ### Systems (`src/systems/`)
 
 | File | Tests | Responsibility |
 | --- | --- | --- |
 | `survival.ts` | `survival.test.ts` (9) | HP, Stamina (exhaustion lock hysteresis), Hunger, Warmth (rain, night, puddle, shelter, campfire override + healing), inventory (`rations`, `medkits`, `warmers`, `bottles`, `scrap`, `wood`, `stone`), atomic `spendResources` / `takeInventory`, `WORKBENCH_RECIPES`, `reviveAtCamp`, `serialize`/`hydrate`. |
-| `harvest.ts` | `harvest.test.ts` (2) | 14 photorealistic Douglas Fir timber pines (`HARVEST_NODE_SPECS`, 3 Axe chops -> `10 Wood`, `YXZ` topple fall, cut stump collider `r = 0.34`) & 10 mossy granite outcrops (3 Pickaxe hits -> `9 Stone + 1 Scrap`), wrong-tool hints, pooled chip/shard bursts, `serializeDepletedIds`/`hydrateDepletedIds`. |
+| `harvest.ts` | `harvest.test.ts` (2) | Delegates full-forest tree chopping to `FrontierEnvironment.forest` (`ChoppableForestController`: all playable valley forest trees across 5 species, 3 Axe chops -> `10 Wood`, zero surveyor bands) and manages 10 mossy granite outcrops (`HARVEST_ROCK_SPECS`, 3 Pickaxe hits -> `9 Stone + 1 Scrap`), wrong-tool hints, pooled wood-chip/stone-shard bursts, and combined `serializeDepletedIds`/`hydrateDepletedIds`. |
 | `building.ts` | `building.test.ts` (3) | `[Tab]` 7-piece snap-together modular building (`Foundation`, `Wall`, `Doorway`, `Roof`, `Spikes`, `Storage`, `Workbench`), zero-allocation green/red ghost preview, hinged door OBB toggling, `getFloorHeightAt`, `isInsideBuiltShelter`, `checkSpikeHit`, zero-modal `depositOrWithdrawStorage`, `[X]` dismantle with 50% rounded-up refund, `serialize`/`hydrate`. |
 | `camp.ts` | `camp.test.ts` (3) | Craftable stone-ring Campfires (GLSL flame & rising spark shaders, `r = 0.54` non-occluding collider, warmth/cooking/Stalker-repel radii) and timber/canvas Lean-To Shelters (overhead cover + custom Camp Respawn), `serialize`/`hydrate`. |
 | `scavenge.ts` | — | 8 handcrafted roadside loot caches with proximity glints, animated lid-open state, `serializeLootedIds`/`hydrateLootedIds`. |
@@ -52,26 +53,32 @@
 | `threats.ts` | — | Patrolling MoCap Raiders (`raider.glb`, cloned via `SkeletonUtils.clone`) and nocturnal predator **The Hollow Stalker** (`hollow_stalker.glb`), vision cones, acoustic hearing, pooled throwable glass bottles & shatter bursts, flashlight recoil, hysteretic campfire retreat (`fireFleeTimer`), Defensive Spikes damage/stagger/loot, `getSupportHeight` deck footing. |
 | `atmosphere.ts` | `atmosphere.test.ts` (6) | 24-hour day/night clock (`dawn`, `morning`, `afternoon`, `golden_hour`, `dusk`, `night`), rolling storms (`clear`/`overcast`/`rain`/`storm`), lightning & thunder triggers, and monotonic phase-integrated GPU `RainField`. |
 | `flashlight.ts` | — | Volumetric cone beam shader (`excludeFromGtao = true`), `SpotLight`, battery drain & auto-recharge, and `getBeamExposure` for Stalker counterplay. |
-| `wildlife.ts` | — | Ambient circling ravens, startled obstacle-aware forest deer, and nocturnal fireflies (`excludeFromGtao = true`). |
-| `persistence.ts` | `persistence.test.ts` (2) | Strict zero-`any` runtime-validated `localStorage` save/load (`overgrown_frontier_save_v1`) with `WORLD_BOUNDS` clamping, array length caps, and quota/private-mode safety. |
+| `wildlife.ts` | — | Async-loaded sculpted & animated `pacific_raven.glb` circling ravens (`glide`/`flap`) and `whitetail_deer.glb` obstacle-aware forest buck & doe (`SkeletonUtils.clone`, `Antlers` visibility toggle, `idle_graze`/`alert`/`trot`/`gallop`) with instant procedural fallbacks, plus nocturnal fireflies (`excludeFromGtao = true`, `pow()` base-guarded). |
+| `persistence.ts` | `persistence.test.ts` (2) | Strict zero-`any` runtime-validated `localStorage` save/load (`overgrown_frontier_save_v1`) with `WORLD_BOUNDS` clamping, array length caps (`depletedHarvestIds <= 320`), and quota/private-mode safety. |
 | `audio.ts` | — | Procedural Web Audio: dynamic wind/rain/shelter acoustics, thunder, spatial metal creaks, footsteps (`asphalt`/`forest`/`puddle`), combat/bottle/Stalker SFX, continuous spatial campfire murmur + ember crackles, and wood-chop/rock-mine/build/dismantle/door/spike SFX. |
 
 ---
 
 ## 3D Asset & MoCap Pipeline Inventory
 
-### Staged Runtime Assets (Tracked via Git LFS on `main`)
+### Staged Runtime Assets (Tracked via Git LFS on `main` & Feature Branches)
 
-- **3D GLB Models (`public/assets/`):**
-  - `survivor.glb` (`3.97 MB`) — 34-bone twist-rigged survivor with 2-joint fist-curl fingers and 15 baked 24 fps optical MoCap clips (`idle`, `walk`, `jog`, `run`, `walk_back`, `strafe_left`, `strafe_right`, `crouch_idle`, `crouch_walk`, `attack`, `attack_left`, `jump_start`, `jump_air`, `jump_land`, `throw`).
+- **3D GLB Models (`public/assets/` — 9 total):**
+  - `survivor.glb` (`4.04 MB`) — 34-bone twist-rigged survivor with 2-joint fist-curl fingers and 17 baked 24 fps optical MoCap/authored clips (`idle`, `walk`, `jog`, `run`, `walk_back`, `strafe_left`, `strafe_right`, `crouch_idle`, `crouch_walk`, `attack`, `attack_left`, `axe_swing`, `pickaxe_swing`, `jump_start`, `jump_air`, `jump_land`, `throw`).
+  - `felling_axe.glb` (`625 KB`) & `pickaxe.glb` (`624 KB`) — AAA sculpted PBR handheld survival tools (`origin=(0,0,0)` leather grip, `+Y` shaft, `-Z` cutting blade / front pick spike).
+  - `whitetail_deer.glb` (`824 KB`) — 26-bone rigged & animated Pacific Northwest whitetail deer (`DeerBody` + toggleable `Antlers`, `idle_graze`, `alert`, `trot`, `gallop`).
+  - `pacific_raven.glb` (`800 KB`) — 14-bone rigged & animated Pacific Northwest raven (`glide`, `flap`).
   - `raider.glb` (`3.36 MB`) — 32-bone MoCap hostile scavenger raider (`idle`, `walk`, `jog`, `run`, `attack`, `hit`, `death`).
   - `hollow_stalker.glb` (`4.10 MB`) — 34-bone sculpted original forest predator (`idle`, `walk`, `jog`, `run`, `attack`, `hit`, `death`).
   - `rusted_van.glb` (`5.52 MB`) & `rusted_sedan.glb` (`5.32 MB`) — Sculpted abandoned Pacific Northwest highway wrecks.
 - **PBR Source Textures (`public/textures/`):** `asphalt.jpg`, `concrete.jpg`, `fabric_olive.jpg`, `fern_frond.jpg`, `forest_floor.jpg`, `ivy_vines.jpg`, `mossy_rock.jpg`, `pine_bark.jpg`, `pine_branch.jpg`, `rust_metal.jpg` (10 photographic maps).
 
-### External Blender AAA Retargeting Scripts (Host Library)
+### External Blender AAA Asset & Retargeting Scripts (Host Library)
 
 - Survivor: `C:\GameDev\assets\library\frontier_survivor\retarget_mocap_survivor_aaa.py`
+- Survival Tools (Felling Axe & Pickaxe): `C:\GameDev\assets\library\frontier_tools\build_survival_tools_aaa.py`
+- Whitetail Deer: `C:\GameDev\assets\library\whitetail_deer\rig_animate_deer_aaa.py`
+- Pacific Raven: `C:\GameDev\assets\library\pacific_raven\rig_animate_raven_aaa.py`
 - Raider: `C:\GameDev\assets\library\frontier_raider\retarget_mocap_raider_aaa.py`
 - Hollow Stalker: `C:\GameDev\assets\library\hollow_stalker\retarget_mocap_stalker_aaa.py`
 - Raw optical MoCap inbox: `C:\GameDev\assets\inbox\`
@@ -121,4 +128,4 @@ Stored as JSON in `window.localStorage` under `SAVE_STORAGE_KEY = 'overgrown_fro
 - `storageStash`: `{ wood, stone, scrap, rations, medkits, warmers, bottles }`
 - `camp`: `{ campfires: { x, z }[], shelters: { x, z, yaw }[] }` (capped at `16` each)
 - `lootedCacheIds`: `string[]` (capped at `32`)
-- `depletedHarvestIds`: `string[]` (capped at `64`)
+- `depletedHarvestIds`: `string[]` (capped at `320`)

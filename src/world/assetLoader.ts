@@ -22,6 +22,10 @@ export const DEFAULT_GLB_SLOT_MANIFEST: Readonly<Record<string, string>> = {
   hollow_stalker: './assets/hollow_stalker.glb',
   overgrown_van: './assets/rusted_van.glb',
   abandoned_sedan: './assets/rusted_sedan.glb',
+  felling_axe: './assets/felling_axe.glb',
+  pickaxe: './assets/pickaxe.glb',
+  whitetail_deer: './assets/whitetail_deer.glb',
+  pacific_raven: './assets/pacific_raven.glb',
 };
 
 let sharedLoader: GLTFLoader | null = null;

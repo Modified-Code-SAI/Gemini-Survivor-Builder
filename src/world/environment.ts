@@ -22,9 +22,40 @@ export interface SpatialRuinCue {
   readonly sourceZ: number;
 }
 
+export interface ChoppableTreeTarget {
+  readonly id: string;
+  readonly x: number;
+  readonly z: number;
+  readonly terrainY: number;
+  readonly radius: number;
+  readonly depleted: boolean;
+}
+
+export interface ChoppableForestController {
+  getTargets(): readonly ChoppableTreeTarget[];
+  shakeTree(id: string, dirX: number, dirZ: number): void;
+  chopTree(
+    id: string,
+    dirX: number,
+    dirZ: number,
+    liveObstacles: Obstacle[],
+  ): {
+    readonly hit: boolean;
+    readonly depleted: boolean;
+    readonly woodYield: number;
+    readonly hitY: number;
+  };
+  getRemainingCount(): number;
+  getTotalCount(): number;
+  serializeFelledIds(): string[];
+  hydrateFelledIds(ids: readonly string[], liveObstacles: Obstacle[]): void;
+  resetFelled(liveObstacles: Obstacle[]): void;
+}
+
 export interface FrontierEnvironment {
   readonly root: THREE.Group;
   readonly obstacles: readonly Obstacle[];
+  readonly forest: ChoppableForestController;
   isInsidePuddle(x: number, z: number): boolean;
   getWindIntensity(elapsed: number): number;
   sampleRuinMetalProximity(x: number, z: number, out: { proximity: number; sourceX: number; sourceZ: number }): void;
@@ -2632,6 +2663,7 @@ function buildAbandonedVan(
   windshield.position.set(0, 1.61, -1.94);
   windshield.rotation.x = -0.34;
   windshield.rotation.y = Math.PI;
+  windshield.userData['excludeFromGtao'] = true;
   bodyGroup.add(windshield);
 
   // Beveled multi-layer roof cap + roof rails + A/B/C/D pillars
@@ -2707,6 +2739,7 @@ function buildAbandonedVan(
   }
   const rearGlassShard = new THREE.Mesh(new THREE.PlaneGeometry(0.58, 0.46), glassMat);
   rearGlassShard.position.set(width * 0.23, 1.62, rearZ - 0.03);
+  rearGlassShard.userData['excludeFromGtao'] = true;
   bodyGroup.add(rearGlassShard);
 
   const tailLightMat = new THREE.MeshStandardMaterial({
@@ -2872,11 +2905,13 @@ function buildAbandonedSedan(
   windshield.position.set(0, 1.24, -0.78);
   windshield.rotation.x = -0.68;
   windshield.rotation.y = Math.PI;
+  windshield.userData['excludeFromGtao'] = true;
   bodyGroup.add(windshield);
 
   const rearGlass = new THREE.Mesh(new THREE.PlaneGeometry(width * 0.76, 0.66), glassMat);
   rearGlass.position.set(0, 1.24, 1.08);
   rearGlass.rotation.x = -0.64;
+  rearGlass.userData['excludeFromGtao'] = true;
   bodyGroup.add(rearGlass);
 
   const roof = new THREE.Mesh(new THREE.BoxGeometry(width * 0.8, 0.11, 1.64), bodyMat);
@@ -3096,6 +3131,7 @@ function buildUtilityPoles(
       const curve = new THREE.QuadraticBezierCurve3(p0, mid, p1);
       const geo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(14));
       const line = new THREE.Line(geo, wireMat);
+      line.userData['excludeFromGtao'] = true;
       group.add(line);
     }
   };
@@ -3895,6 +3931,62 @@ export function createFrontierEnvironment(
   const dummy = new THREE.Object3D();
   const instColor = new THREE.Color();
 
+  const TREE_MAX_HITS = 3;
+  const FALL_TARGET_ANGLE = 1.46;
+  const FALL_LINGER_SECONDS = 2.2;
+  const FALLING_TREE_POOL_SIZE = 4;
+
+  interface ChoppableTreeRuntime extends ChoppableTreeTarget {
+    readonly species: TreeSpecies;
+    readonly baseY: number;
+    readonly height: number;
+    readonly scaleX: number;
+    readonly scaleZ: number;
+    readonly leanX: number;
+    readonly leanZ: number;
+    readonly yaw: number;
+    readonly stumpScale: number;
+    readonly barkR: number;
+    readonly barkG: number;
+    readonly barkB: number;
+    readonly instanceIndex: number;
+    readonly trunkInst: THREE.InstancedMesh;
+    readonly canopyInst: THREE.InstancedMesh | null;
+    readonly trunkGeo: THREE.BufferGeometry;
+    readonly canopyGeo: THREE.BufferGeometry | null;
+    readonly trunkMat: THREE.MeshStandardMaterial;
+    readonly canopyMat: THREE.MeshStandardMaterial | null;
+    readonly baseMatrix: THREE.Matrix4;
+    readonly standingObstacle: Obstacle;
+    readonly stumpObstacle: Obstacle;
+    hitsRemaining: number;
+    depleted: boolean;
+    shakeTimer: number;
+    shakeDuration: number;
+    shakeDirX: number;
+    shakeDirZ: number;
+  }
+
+  interface FallingTreeSlot {
+    readonly mainPivot: THREE.Group;
+    readonly treeOffset: THREE.Group;
+    readonly trunkMesh: THREE.Mesh;
+    readonly canopyMesh: THREE.Mesh;
+    active: boolean;
+    fallAngle: number;
+    fallVel: number;
+    fallYaw: number;
+    fallLinger: number;
+  }
+
+  const playableTrees: ChoppableTreeRuntime[] = [];
+  const treeById = new Map<string, ChoppableTreeRuntime>();
+  const shakingTrees: ChoppableTreeRuntime[] = [];
+  let fallbackTrunkGeo: THREE.BufferGeometry | null = null;
+  let fallbackTrunkMat: THREE.MeshStandardMaterial = barkMat;
+  let fallbackCanopyGeo: THREE.BufferGeometry | null = null;
+  let fallbackCanopyMat: THREE.MeshStandardMaterial = pineBoughMat;
+
   for (const cfg of speciesConfigs) {
     const list = buckets[cfg.species];
     if (list.length === 0) {
@@ -3906,13 +3998,23 @@ export function createFrontierEnvironment(
     trunkInst.castShadow = true;
     trunkInst.receiveShadow = true;
 
+    const canopyGeo = cfg.createCanopy && cfg.canopyMaterial ? cfg.createCanopy() : null;
     const canopyInst =
-      cfg.createCanopy && cfg.canopyMaterial
-        ? new THREE.InstancedMesh(cfg.createCanopy(), cfg.canopyMaterial, list.length)
+      canopyGeo && cfg.canopyMaterial
+        ? new THREE.InstancedMesh(canopyGeo, cfg.canopyMaterial, list.length)
         : null;
     if (canopyInst) {
       canopyInst.castShadow = true;
       canopyInst.receiveShadow = true;
+    }
+
+    if (!fallbackTrunkGeo) {
+      fallbackTrunkGeo = trunkGeo;
+      fallbackTrunkMat = cfg.trunkMaterial;
+    }
+    if (!fallbackCanopyGeo && canopyGeo && cfg.canopyMaterial) {
+      fallbackCanopyGeo = canopyGeo;
+      fallbackCanopyMat = cfg.canopyMaterial;
     }
 
     for (let i = 0; i < list.length; i += 1) {
@@ -3920,7 +4022,8 @@ export function createFrontierEnvironment(
       if (!t) {
         continue;
       }
-      const baseY = getTerrainHeight(t.x, t.z) - 0.35;
+      const terrainY = getTerrainHeight(t.x, t.z);
+      const baseY = terrainY - 0.35;
       const scaleX = t.height * t.widthScaleX;
       const scaleZ = t.height * t.widthScaleZ;
 
@@ -3943,6 +4046,9 @@ export function createFrontierEnvironment(
       } else {
         instColor.setRGB(0.94 * t.barkShift, 0.93 * t.barkShift, 0.9 * t.barkShift);
       }
+      const barkR = instColor.r;
+      const barkG = instColor.g;
+      const barkB = instColor.b;
       trunkInst.setColorAt(i, instColor);
 
       if (canopyInst) {
@@ -3965,10 +4071,55 @@ export function createFrontierEnvironment(
         canopyInst.setColorAt(i, instColor);
       }
 
-      if (Math.abs(t.x) <= 50 && t.z >= -86 && t.z <= 32) {
+      if (Math.abs(t.x) <= 54 && t.z >= -88 && t.z <= 34) {
         const avgScaleXZ = (scaleX + scaleZ) * 0.5;
         const radius = Math.max(0.32, Math.min(0.84, avgScaleXZ * cfg.trunkCollisionRatio));
-        obstacles.push({ kind: 'circle', x: t.x, z: t.z, radius });
+        const standingObstacle: Obstacle = { kind: 'circle', x: t.x, z: t.z, radius };
+        obstacles.push(standingObstacle);
+
+        // Keep cut stump radius strictly < MIN_OCCLUDING_CIRCLE_RADIUS (0.55) so enemies keep LOS
+        const stumpRadius = Math.min(0.42, Math.max(0.28, radius * 0.72));
+        const stumpObstacle: Obstacle = { kind: 'circle', x: t.x, z: t.z, radius: stumpRadius };
+        const stumpScale = Math.max(0.75, Math.min(1.65, radius / 0.36));
+        const id = `forest_tree_${playableTrees.length}`;
+
+        const runtime: ChoppableTreeRuntime = {
+          id,
+          species: cfg.species,
+          x: t.x,
+          z: t.z,
+          terrainY,
+          baseY,
+          height: t.height,
+          scaleX,
+          scaleZ,
+          leanX: t.leanX,
+          leanZ: t.leanZ,
+          yaw: t.yaw,
+          radius,
+          stumpScale,
+          barkR,
+          barkG,
+          barkB,
+          instanceIndex: i,
+          trunkInst,
+          canopyInst,
+          trunkGeo,
+          canopyGeo,
+          trunkMat: cfg.trunkMaterial,
+          canopyMat: cfg.canopyMaterial,
+          baseMatrix: dummy.matrix.clone(),
+          standingObstacle,
+          stumpObstacle,
+          hitsRemaining: TREE_MAX_HITS,
+          depleted: false,
+          shakeTimer: 0,
+          shakeDuration: 0.28,
+          shakeDirX: 0,
+          shakeDirZ: -1,
+        };
+        playableTrees.push(runtime);
+        treeById.set(id, runtime);
       }
     }
 
@@ -3986,6 +4137,408 @@ export function createFrontierEnvironment(
       root.add(canopyInst);
     }
   }
+
+  // Shared cut wood stump InstancedMeshes (revealed only when playable forest trees are felled)
+  const stumpCoreMat = new THREE.MeshStandardMaterial({
+    color: 0xc99f67,
+    roughness: 0.86,
+    metalness: 0.02,
+    normalMap: atlas.pineBark.normalMap,
+    normalScale: new THREE.Vector2(0.35, 0.35),
+  });
+  sharedMaterials.add(stumpCoreMat);
+
+  const stumpBarkGeo = new THREE.CylinderGeometry(0.27, 0.41, 0.74, 9);
+  stumpBarkGeo.translate(0, 0.07, 0);
+  const stumpCoreGeo = new THREE.CylinderGeometry(0.264, 0.264, 0.022, 9);
+  stumpCoreGeo.translate(0, 0.446, 0);
+
+  const stumpCapacity = Math.max(1, playableTrees.length);
+  const stumpBarkInst = new THREE.InstancedMesh(stumpBarkGeo, barkMat, stumpCapacity);
+  stumpBarkInst.castShadow = true;
+  stumpBarkInst.receiveShadow = true;
+  stumpBarkInst.frustumCulled = false;
+  instColor.setRGB(1, 1, 1);
+  stumpBarkInst.setColorAt(0, instColor);
+  stumpBarkInst.count = 0;
+  stumpBarkInst.visible = false;
+  root.add(stumpBarkInst);
+
+  const stumpCoreInst = new THREE.InstancedMesh(stumpCoreGeo, stumpCoreMat, stumpCapacity);
+  stumpCoreInst.receiveShadow = true;
+  stumpCoreInst.frustumCulled = false;
+  stumpCoreInst.count = 0;
+  stumpCoreInst.visible = false;
+  root.add(stumpCoreInst);
+
+  // Pre-allocated pool of 4 falling-tree actors sharing species geometries & materials (zero double-disposal)
+  const fallingPool: FallingTreeSlot[] = [];
+  if (fallbackTrunkGeo && fallbackCanopyGeo) {
+    for (let s = 0; s < FALLING_TREE_POOL_SIZE; s += 1) {
+      const mainPivot = new THREE.Group();
+      mainPivot.rotation.order = 'YXZ';
+      mainPivot.visible = false;
+
+      const treeOffset = new THREE.Group();
+      mainPivot.add(treeOffset);
+
+      const trunkMesh = new THREE.Mesh(fallbackTrunkGeo, fallbackTrunkMat);
+      trunkMesh.castShadow = true;
+      trunkMesh.receiveShadow = true;
+      treeOffset.add(trunkMesh);
+
+      const canopyMesh = new THREE.Mesh(fallbackCanopyGeo, fallbackCanopyMat);
+      canopyMesh.castShadow = true;
+      canopyMesh.receiveShadow = true;
+      treeOffset.add(canopyMesh);
+
+      root.add(mainPivot);
+      fallingPool.push({
+        mainPivot,
+        treeOffset,
+        trunkMesh,
+        canopyMesh,
+        active: false,
+        fallAngle: 0,
+        fallVel: 0,
+        fallYaw: 0,
+        fallLinger: 0,
+      });
+    }
+  }
+
+  // Pre-allocated scratch transforms for zero per-frame heap allocations during tree shake & felling
+  const zeroScaleMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
+  const scratchLocalDummy = new THREE.Object3D();
+  const scratchTiltDummy = new THREE.Object3D();
+  const scratchShakeMat = new THREE.Matrix4();
+  const scratchStumpDummy = new THREE.Object3D();
+  const scratchStumpColor = new THREE.Color();
+
+  let remainingTreeCount = playableTrees.length;
+  let nextFallSlot = 0;
+
+  function swapLiveObstacle(liveObstacles: Obstacle[], removeObs: Obstacle, addObs: Obstacle): void {
+    const idx = liveObstacles.indexOf(removeObs);
+    if (idx >= 0) {
+      liveObstacles[idx] = addObs;
+    } else if (!liveObstacles.includes(addObs)) {
+      liveObstacles.push(addObs);
+    }
+  }
+
+  function rebuildStumpInstances(): void {
+    let stumpCount = 0;
+    for (let i = 0; i < playableTrees.length; i += 1) {
+      const tree = playableTrees[i];
+      if (!tree || !tree.depleted) {
+        continue;
+      }
+      scratchStumpDummy.position.set(tree.x, tree.terrainY, tree.z);
+      scratchStumpDummy.rotation.set(0, tree.yaw, 0);
+      scratchStumpDummy.scale.setScalar(tree.stumpScale);
+      scratchStumpDummy.updateMatrix();
+      stumpBarkInst.setMatrixAt(stumpCount, scratchStumpDummy.matrix);
+      stumpCoreInst.setMatrixAt(stumpCount, scratchStumpDummy.matrix);
+
+      if (tree.species === 'alder') {
+        scratchStumpColor.setRGB(1.16 * tree.barkR, 1.16 * tree.barkG, 1.12 * tree.barkB);
+      } else if (tree.species === 'dead_snag') {
+        scratchStumpColor.setRGB(1.06 * tree.barkR, 1.05 * tree.barkG, 1.02 * tree.barkB);
+      } else {
+        scratchStumpColor.setRGB(tree.barkR, tree.barkG, tree.barkB);
+      }
+      stumpBarkInst.setColorAt(stumpCount, scratchStumpColor);
+      stumpCount += 1;
+    }
+    stumpBarkInst.count = stumpCount;
+    stumpCoreInst.count = stumpCount;
+    stumpBarkInst.visible = stumpCount > 0;
+    stumpCoreInst.visible = stumpCount > 0;
+    stumpBarkInst.instanceMatrix.needsUpdate = true;
+    stumpCoreInst.instanceMatrix.needsUpdate = true;
+    if (stumpBarkInst.instanceColor) {
+      stumpBarkInst.instanceColor.needsUpdate = true;
+    }
+  }
+
+  function activateFallingTree(tree: ChoppableTreeRuntime, awayX: number, awayZ: number): void {
+    if (fallingPool.length === 0) {
+      return;
+    }
+    let chosen: FallingTreeSlot | undefined;
+    for (let i = 0; i < fallingPool.length; i += 1) {
+      const candidate = fallingPool[i];
+      if (candidate && !candidate.active) {
+        chosen = candidate;
+        break;
+      }
+    }
+    if (!chosen) {
+      chosen = fallingPool[nextFallSlot];
+      nextFallSlot = (nextFallSlot + 1) % fallingPool.length;
+    }
+    if (!chosen) {
+      return;
+    }
+
+    const cutY = tree.terrainY + 0.43 * tree.stumpScale;
+    const fallYaw = Math.atan2(awayX, awayZ);
+
+    chosen.mainPivot.position.set(tree.x, cutY, tree.z);
+    chosen.mainPivot.rotation.set(0, fallYaw, 0);
+    chosen.mainPivot.visible = true;
+
+    chosen.treeOffset.position.set(0, -0.18 * tree.stumpScale, 0);
+    chosen.treeOffset.rotation.set(0, tree.yaw - fallYaw, 0);
+    chosen.treeOffset.scale.set(tree.scaleX, tree.height, tree.scaleZ);
+
+    chosen.trunkMesh.geometry = tree.trunkGeo;
+    chosen.trunkMesh.material = tree.trunkMat;
+    if (tree.canopyGeo && tree.canopyMat) {
+      chosen.canopyMesh.geometry = tree.canopyGeo;
+      chosen.canopyMesh.material = tree.canopyMat;
+      chosen.canopyMesh.visible = true;
+    } else {
+      chosen.canopyMesh.visible = false;
+    }
+
+    chosen.active = true;
+    chosen.fallAngle = 0;
+    chosen.fallVel = 0.65;
+    chosen.fallYaw = fallYaw;
+    chosen.fallLinger = 0;
+  }
+
+  function triggerTreeShake(
+    tree: ChoppableTreeRuntime,
+    dirX: number,
+    dirZ: number,
+    duration: number,
+  ): void {
+    const len = Math.hypot(dirX, dirZ);
+    tree.shakeDirX = len > 1e-4 ? dirX / len : 0;
+    tree.shakeDirZ = len > 1e-4 ? dirZ / len : -1;
+    tree.shakeTimer = duration;
+    tree.shakeDuration = duration;
+    if (!shakingTrees.includes(tree)) {
+      shakingTrees.push(tree);
+    }
+  }
+
+  function updateChoppableForest(dt: number): void {
+    const simDt = Math.max(0, Math.min(dt, 0.1));
+    if (simDt <= 0) {
+      return;
+    }
+
+    // 1. Update damped recoil shakes directly on active instanced trees (zero heap allocations)
+    for (let i = shakingTrees.length - 1; i >= 0; i -= 1) {
+      const tree = shakingTrees[i];
+      if (!tree || tree.depleted) {
+        shakingTrees.splice(i, 1);
+        continue;
+      }
+      tree.shakeTimer = Math.max(0, tree.shakeTimer - simDt);
+      if (tree.shakeTimer <= 0) {
+        tree.trunkInst.setMatrixAt(tree.instanceIndex, tree.baseMatrix);
+        tree.trunkInst.instanceMatrix.needsUpdate = true;
+        if (tree.canopyInst) {
+          tree.canopyInst.setMatrixAt(tree.instanceIndex, tree.baseMatrix);
+          tree.canopyInst.instanceMatrix.needsUpdate = true;
+        }
+        shakingTrees.splice(i, 1);
+        continue;
+      }
+
+      const maxAmp = tree.shakeDuration > 0.2 ? 0.038 : 0.018;
+      const tilt = (tree.shakeTimer / tree.shakeDuration) * maxAmp * Math.sin(tree.shakeTimer * 52);
+
+      scratchLocalDummy.position.set(0, 0, 0);
+      scratchLocalDummy.rotation.set(tree.leanX, tree.yaw, tree.leanZ);
+      scratchLocalDummy.scale.set(tree.scaleX, tree.height, tree.scaleZ);
+      scratchLocalDummy.updateMatrix();
+
+      scratchTiltDummy.position.set(tree.x, tree.baseY, tree.z);
+      scratchTiltDummy.rotation.set(tree.shakeDirZ * tilt, 0, -tree.shakeDirX * tilt);
+      scratchTiltDummy.scale.set(1, 1, 1);
+      scratchTiltDummy.updateMatrix();
+
+      scratchShakeMat.multiplyMatrices(scratchTiltDummy.matrix, scratchLocalDummy.matrix);
+      tree.trunkInst.setMatrixAt(tree.instanceIndex, scratchShakeMat);
+      tree.trunkInst.instanceMatrix.needsUpdate = true;
+      if (tree.canopyInst) {
+        tree.canopyInst.setMatrixAt(tree.instanceIndex, scratchShakeMat);
+        tree.canopyInst.instanceMatrix.needsUpdate = true;
+      }
+    }
+
+    // 2. Advance active falling-tree topple actors smoothly to ground and fade out after lingering
+    for (let i = 0; i < fallingPool.length; i += 1) {
+      const slot = fallingPool[i];
+      if (!slot || !slot.active) {
+        continue;
+      }
+      if (slot.fallAngle < FALL_TARGET_ANGLE) {
+        slot.fallVel += 3.6 * simDt;
+        slot.fallAngle = Math.min(FALL_TARGET_ANGLE, slot.fallAngle + slot.fallVel * simDt);
+        slot.mainPivot.rotation.set(slot.fallAngle, slot.fallYaw, 0);
+      } else {
+        slot.fallLinger += simDt;
+        if (slot.fallLinger >= FALL_LINGER_SECONDS) {
+          slot.active = false;
+          slot.mainPivot.visible = false;
+        }
+      }
+    }
+  }
+
+  function resetFelledTrees(liveObstacles: Obstacle[]): void {
+    shakingTrees.length = 0;
+    for (let s = 0; s < fallingPool.length; s += 1) {
+      const slot = fallingPool[s];
+      if (slot) {
+        slot.active = false;
+        slot.fallAngle = 0;
+        slot.fallVel = 0;
+        slot.fallLinger = 0;
+        slot.mainPivot.visible = false;
+      }
+    }
+
+    const dirtyInsts = new Set<THREE.InstancedMesh>();
+    for (let i = 0; i < playableTrees.length; i += 1) {
+      const tree = playableTrees[i];
+      if (!tree) {
+        continue;
+      }
+      const needsRestore = tree.depleted || tree.shakeTimer > 0;
+      if (tree.depleted) {
+        swapLiveObstacle(liveObstacles, tree.stumpObstacle, tree.standingObstacle);
+      }
+      tree.hitsRemaining = TREE_MAX_HITS;
+      tree.depleted = false;
+      tree.shakeTimer = 0;
+      if (needsRestore) {
+        tree.trunkInst.setMatrixAt(tree.instanceIndex, tree.baseMatrix);
+        dirtyInsts.add(tree.trunkInst);
+        if (tree.canopyInst) {
+          tree.canopyInst.setMatrixAt(tree.instanceIndex, tree.baseMatrix);
+          dirtyInsts.add(tree.canopyInst);
+        }
+      }
+    }
+    for (const inst of dirtyInsts) {
+      inst.instanceMatrix.needsUpdate = true;
+    }
+    remainingTreeCount = playableTrees.length;
+    rebuildStumpInstances();
+  }
+
+  const forest: ChoppableForestController = {
+    getTargets(): readonly ChoppableTreeTarget[] {
+      return playableTrees;
+    },
+    shakeTree(id: string, dirX: number, dirZ: number): void {
+      const tree = treeById.get(id);
+      if (!tree || tree.depleted) {
+        return;
+      }
+      triggerTreeShake(tree, dirX, dirZ, 0.16);
+    },
+    chopTree(
+      id: string,
+      dirX: number,
+      dirZ: number,
+      liveObstacles: Obstacle[],
+    ): {
+      readonly hit: boolean;
+      readonly depleted: boolean;
+      readonly woodYield: number;
+      readonly hitY: number;
+    } {
+      const tree = treeById.get(id);
+      if (!tree || tree.depleted) {
+        return { hit: false, depleted: false, woodYield: 0, hitY: 0 };
+      }
+
+      const len = Math.hypot(dirX, dirZ);
+      const nx = len > 1e-4 ? dirX / len : 0;
+      const nz = len > 1e-4 ? dirZ / len : -1;
+      const hitY = tree.terrainY + 1.15;
+
+      tree.hitsRemaining = Math.max(0, tree.hitsRemaining - 1);
+      if (tree.hitsRemaining > 0) {
+        triggerTreeShake(tree, nx, nz, 0.28);
+        return { hit: true, depleted: false, woodYield: 2, hitY };
+      }
+
+      tree.depleted = true;
+      tree.shakeTimer = 0;
+      remainingTreeCount = Math.max(0, remainingTreeCount - 1);
+
+      tree.trunkInst.setMatrixAt(tree.instanceIndex, zeroScaleMatrix);
+      tree.trunkInst.instanceMatrix.needsUpdate = true;
+      if (tree.canopyInst) {
+        tree.canopyInst.setMatrixAt(tree.instanceIndex, zeroScaleMatrix);
+        tree.canopyInst.instanceMatrix.needsUpdate = true;
+      }
+
+      swapLiveObstacle(liveObstacles, tree.standingObstacle, tree.stumpObstacle);
+      rebuildStumpInstances();
+      activateFallingTree(tree, nx, nz);
+
+      return { hit: true, depleted: true, woodYield: 6, hitY };
+    },
+    getRemainingCount(): number {
+      return remainingTreeCount;
+    },
+    getTotalCount(): number {
+      return playableTrees.length;
+    },
+    serializeFelledIds(): string[] {
+      const ids: string[] = [];
+      for (let i = 0; i < playableTrees.length; i += 1) {
+        const tree = playableTrees[i];
+        if (tree && tree.depleted) {
+          ids.push(tree.id);
+        }
+      }
+      return ids;
+    },
+    hydrateFelledIds(ids: readonly string[], liveObstacles: Obstacle[]): void {
+      resetFelledTrees(liveObstacles);
+      if (ids.length === 0) {
+        return;
+      }
+      const idSet = new Set(ids);
+      const dirtyInsts = new Set<THREE.InstancedMesh>();
+      for (let i = 0; i < playableTrees.length; i += 1) {
+        const tree = playableTrees[i];
+        if (!tree || !idSet.has(tree.id)) {
+          continue;
+        }
+        tree.hitsRemaining = 0;
+        tree.depleted = true;
+        tree.shakeTimer = 0;
+        remainingTreeCount = Math.max(0, remainingTreeCount - 1);
+        tree.trunkInst.setMatrixAt(tree.instanceIndex, zeroScaleMatrix);
+        dirtyInsts.add(tree.trunkInst);
+        if (tree.canopyInst) {
+          tree.canopyInst.setMatrixAt(tree.instanceIndex, zeroScaleMatrix);
+          dirtyInsts.add(tree.canopyInst);
+        }
+        swapLiveObstacle(liveObstacles, tree.standingObstacle, tree.stumpObstacle);
+      }
+      for (const inst of dirtyInsts) {
+        inst.instanceMatrix.needsUpdate = true;
+      }
+      rebuildStumpInstances();
+    },
+    resetFelled(liveObstacles: Obstacle[]): void {
+      resetFelledTrees(liveObstacles);
+    },
+  };
 
   // 7. Dense instanced western sword ferns (real botanical photo + corrected UVs + GPU wind!)
   const fernMax = 450;
@@ -4281,10 +4834,13 @@ export function createFrontierEnvironment(
   return {
     root,
     obstacles,
+    forest,
     isInsidePuddle: isInsidePuddleFootstep,
     getWindIntensity,
     sampleRuinMetalProximity,
-    update(elapsed: number, _dt: number, atmosphere?: AtmosphereSnapshot): void {
+    update(elapsed: number, dt: number, atmosphere?: AtmosphereSnapshot): void {
+      updateChoppableForest(dt);
+
       const windBoost = atmosphere ? atmosphere.windBoost : 1.0;
       const rainIntensity = atmosphere ? atmosphere.rainIntensity : 0;
 

@@ -185,7 +185,7 @@ function parseWorldSaveData(raw: unknown): WorldSaveData | null {
   }
 
   const lootedCacheIds = readStringArray(raw['lootedCacheIds'], 32);
-  const depletedHarvestIds = readStringArray(raw['depletedHarvestIds'], 64);
+  const depletedHarvestIds = readStringArray(raw['depletedHarvestIds'], 320);
   if (!lootedCacheIds || !depletedHarvestIds) {
     return null;
   }

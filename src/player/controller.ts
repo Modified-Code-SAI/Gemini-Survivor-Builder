@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import type { EquippedTool } from '../systems/harvest';
-import { collectMaterialTextures, loadOptionalGlbAsset } from '../world/assetLoader';
+import {
+  collectMaterialTextures,
+  loadOptionalGlbAsset,
+  loadOptionalGlbSlot,
+} from '../world/assetLoader';
 import {
   clamp,
   getRoadFactor,
@@ -20,6 +24,30 @@ export type PlayerStance =
   | 'attacking'
   | 'throwing';
 export type SurfaceKind = 'asphalt' | 'forest' | 'puddle';
+export type AttackClipKind = 'fists_right' | 'fists_left' | 'axe' | 'pickaxe';
+
+export const HAND_TOOL_GRIP_OFFSET = { x: 0, y: 0.052, z: 0 } as const;
+
+// Exact 6-decimal Three.js hand_R upright grip quaternion verified in Blender against survivor.glb
+export const HAND_TOOL_GRIP_QUATERNION = {
+  x: 0.624338,
+  y: -0.331967,
+  z: 0.672499,
+  w: 0.218508,
+} as const;
+
+export function resolveAttackClipKind(
+  tool: EquippedTool,
+  useLeftPunch: boolean,
+): AttackClipKind {
+  if (tool === 'axe') {
+    return 'axe';
+  }
+  if (tool === 'pickaxe') {
+    return 'pickaxe';
+  }
+  return useLeftPunch ? 'fists_left' : 'fists_right';
+}
 
 export interface PlayerControllerOptions {
   readonly camera: THREE.PerspectiveCamera;
@@ -137,6 +165,10 @@ interface GlbSurvivorState {
   readonly attackRightUpperAction: THREE.AnimationAction | null;
   readonly attackLeftAction: THREE.AnimationAction | null;
   readonly attackLeftUpperAction: THREE.AnimationAction | null;
+  readonly axeSwingAction: THREE.AnimationAction | null;
+  readonly axeSwingUpperAction: THREE.AnimationAction | null;
+  readonly pickaxeSwingAction: THREE.AnimationAction | null;
+  readonly pickaxeSwingUpperAction: THREE.AnimationAction | null;
   readonly throwAction: THREE.AnimationAction | null;
   readonly throwUpperAction: THREE.AnimationAction | null;
   wIdle: number;
@@ -150,6 +182,8 @@ interface GlbSurvivorState {
   wJumpLand: number;
   wAttackRight: number;
   wAttackLeft: number;
+  wAxeSwing: number;
+  wPickaxeSwing: number;
   wThrow: number;
 }
 
@@ -1290,9 +1324,14 @@ function createHandToolsProp(): HandToolsProp {
   const group = new THREE.Group();
   group.name = 'SurvivorHandTools';
 
-  const geometries: THREE.BufferGeometry[] = [];
-  const trackGeo = <T extends THREE.BufferGeometry>(g: T): T => {
-    geometries.push(g);
+  const axeFallbackGeos: THREE.BufferGeometry[] = [];
+  const pickFallbackGeos: THREE.BufferGeometry[] = [];
+  const trackAxeGeo = <T extends THREE.BufferGeometry>(g: T): T => {
+    axeFallbackGeos.push(g);
+    return g;
+  };
+  const trackPickGeo = <T extends THREE.BufferGeometry>(g: T): T => {
+    pickFallbackGeos.push(g);
     return g;
   };
 
@@ -1317,32 +1356,44 @@ function createHandToolsProp(): HandToolsProp {
     metalness: 0.86,
   });
 
-  // 1. Weathered Felling Axe
+  // 1. Weathered Felling Axe (instant procedural fallback replaced asynchronously by felling_axe.glb)
   const axeGroup = new THREE.Group();
-  const axeHaft = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.017, 0.022, 0.64, 8)), handleMat);
+  const axeHaft = new THREE.Mesh(
+    trackAxeGeo(new THREE.CylinderGeometry(0.017, 0.022, 0.64, 8)),
+    handleMat,
+  );
   axeHaft.position.set(0, 0.22, 0);
   axeHaft.castShadow = true;
   axeGroup.add(axeHaft);
 
-  const axeGrip = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.021, 0.023, 0.16, 8)), wrapMat);
+  const axeGrip = new THREE.Mesh(
+    trackAxeGeo(new THREE.CylinderGeometry(0.021, 0.023, 0.16, 8)),
+    wrapMat,
+  );
   axeGrip.position.set(0, -0.02, 0);
   axeGroup.add(axeGrip);
 
-  const axePoll = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.036, 0.065, 0.08)), steelMat);
+  const axePoll = new THREE.Mesh(
+    trackAxeGeo(new THREE.BoxGeometry(0.036, 0.065, 0.08)),
+    steelMat,
+  );
   axePoll.position.set(0, 0.5, 0);
   axePoll.castShadow = true;
   axeGroup.add(axePoll);
 
-  const axeBlade = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.018, 0.115, 0.125)), edgeMat);
+  const axeBlade = new THREE.Mesh(
+    trackAxeGeo(new THREE.BoxGeometry(0.018, 0.115, 0.125)),
+    edgeMat,
+  );
   axeBlade.position.set(0, 0.5, -0.078);
   axeBlade.castShadow = true;
   axeGroup.add(axeBlade);
   group.add(axeGroup);
 
-  // 2. Heavy Survival Pickaxe
+  // 2. Heavy Survival Pickaxe (instant procedural fallback replaced asynchronously by pickaxe.glb)
   const pickGroup = new THREE.Group();
   const pickHaft = new THREE.Mesh(
-    trackGeo(new THREE.CylinderGeometry(0.018, 0.022, 0.66, 8)),
+    trackPickGeo(new THREE.CylinderGeometry(0.018, 0.022, 0.66, 8)),
     handleMat,
   );
   pickHaft.position.set(0, 0.23, 0);
@@ -1350,24 +1401,33 @@ function createHandToolsProp(): HandToolsProp {
   pickGroup.add(pickHaft);
 
   const pickGrip = new THREE.Mesh(
-    trackGeo(new THREE.CylinderGeometry(0.021, 0.023, 0.16, 8)),
+    trackPickGeo(new THREE.CylinderGeometry(0.021, 0.023, 0.16, 8)),
     wrapMat,
   );
   pickGrip.position.set(0, -0.02, 0);
   pickGroup.add(pickGrip);
 
-  const pickCollar = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.052, 0.064, 0.072)), steelMat);
+  const pickCollar = new THREE.Mesh(
+    trackPickGeo(new THREE.BoxGeometry(0.052, 0.064, 0.072)),
+    steelMat,
+  );
   pickCollar.position.set(0, 0.52, 0);
   pickCollar.castShadow = true;
   pickGroup.add(pickCollar);
 
-  const pickPointFront = new THREE.Mesh(trackGeo(new THREE.ConeGeometry(0.024, 0.22, 6)), edgeMat);
+  const pickPointFront = new THREE.Mesh(
+    trackPickGeo(new THREE.ConeGeometry(0.024, 0.22, 6)),
+    edgeMat,
+  );
   pickPointFront.position.set(0, 0.505, -0.13);
   pickPointFront.rotation.x = -Math.PI * 0.55;
   pickPointFront.castShadow = true;
   pickGroup.add(pickPointFront);
 
-  const pickPointBack = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.036, 0.024, 0.17)), steelMat);
+  const pickPointBack = new THREE.Mesh(
+    trackPickGeo(new THREE.BoxGeometry(0.036, 0.024, 0.17)),
+    steelMat,
+  );
   pickPointBack.position.set(0, 0.51, 0.1);
   pickPointBack.rotation.x = 0.16;
   pickPointBack.castShadow = true;
@@ -1375,6 +1435,50 @@ function createHandToolsProp(): HandToolsProp {
 
   pickGroup.visible = false;
   group.add(pickGroup);
+
+  let toolsDisposed = false;
+  let axeGlbScene: THREE.Group | null = null;
+  let pickGlbScene: THREE.Group | null = null;
+
+  void loadOptionalGlbSlot('felling_axe').then((loaded) => {
+    if (!loaded) {
+      return;
+    }
+    if (toolsDisposed) {
+      disposeObject3DTree(loaded);
+      return;
+    }
+    axeGroup.clear();
+    for (let i = 0; i < axeFallbackGeos.length; i += 1) {
+      axeFallbackGeos[i]?.dispose();
+    }
+    axeFallbackGeos.length = 0;
+    loaded.position.set(0, 0, 0);
+    loaded.rotation.set(0, 0, 0);
+    loaded.scale.setScalar(1);
+    axeGroup.add(loaded);
+    axeGlbScene = loaded;
+  });
+
+  void loadOptionalGlbSlot('pickaxe').then((loaded) => {
+    if (!loaded) {
+      return;
+    }
+    if (toolsDisposed) {
+      disposeObject3DTree(loaded);
+      return;
+    }
+    pickGroup.clear();
+    for (let i = 0; i < pickFallbackGeos.length; i += 1) {
+      pickFallbackGeos[i]?.dispose();
+    }
+    pickFallbackGeos.length = 0;
+    loaded.position.set(0, 0, 0);
+    loaded.rotation.set(0, 0, 0);
+    loaded.scale.setScalar(1);
+    pickGroup.add(loaded);
+    pickGlbScene = loaded;
+  });
 
   return {
     group,
@@ -1384,14 +1488,31 @@ function createHandToolsProp(): HandToolsProp {
       group.visible = tool !== 'fists';
     },
     dispose(): void {
+      toolsDisposed = true;
       group.removeFromParent();
-      for (let i = 0; i < geometries.length; i += 1) {
-        geometries[i]?.dispose();
+      for (let i = 0; i < axeFallbackGeos.length; i += 1) {
+        axeFallbackGeos[i]?.dispose();
       }
+      axeFallbackGeos.length = 0;
+      for (let i = 0; i < pickFallbackGeos.length; i += 1) {
+        pickFallbackGeos[i]?.dispose();
+      }
+      pickFallbackGeos.length = 0;
       handleMat.dispose();
       wrapMat.dispose();
       steelMat.dispose();
       edgeMat.dispose();
+      if (axeGlbScene) {
+        disposeObject3DTree(axeGlbScene);
+        axeGlbScene = null;
+      }
+      if (pickGlbScene) {
+        disposeObject3DTree(pickGlbScene);
+        pickGlbScene = null;
+      }
+      axeGroup.clear();
+      pickGroup.clear();
+      group.clear();
     },
   };
 }
@@ -1505,9 +1626,15 @@ export function createPlayerController(options: PlayerControllerOptions): Player
   const JUMP_LAND_TIME_SCALE = 1.65;
   const ATTACK_RIGHT_TIME_SCALE = 1.35;
   const ATTACK_LEFT_TIME_SCALE = 1.24;
+  const AXE_SWING_TIME_SCALE = 1.32;
+  const PICKAXE_SWING_TIME_SCALE = 1.32;
   const ATTACK_DURATION = 0.74;
   const ATTACK_COOLDOWN = 0.76;
   const ATTACK_WHOOSH_TIME = 0.19;
+  const AXE_ATTACK_DURATION = 0.8;
+  const AXE_ATTACK_COOLDOWN = 0.82;
+  const PICKAXE_ATTACK_DURATION = 0.86;
+  const PICKAXE_ATTACK_COOLDOWN = 0.88;
   const THROW_TIME_SCALE = 1.42;
   const THROW_DURATION = 0.68;
   const THROW_COOLDOWN = 0.72;
@@ -1532,12 +1659,56 @@ export function createPlayerController(options: PlayerControllerOptions): Player
   let attackWhooshPending = false;
   let attackCameraImpulse = 0;
   let nextPunchLeft = false;
-  let activeAttackIsLeft = false;
+  let activeAttackKind: AttackClipKind = 'fists_right';
 
   let throwTimer = 0;
   let throwCooldown = 0;
   let throwElapsed = 0;
   let throwReleasePending = false;
+
+  function stopCombatActionPair(
+    full: THREE.AnimationAction | null,
+    upper: THREE.AnimationAction | null,
+  ): void {
+    if (full) {
+      full.stop();
+      full.setEffectiveWeight(0);
+    }
+    if (upper) {
+      upper.stop();
+      upper.setEffectiveWeight(0);
+    }
+  }
+
+  function playCombatActionPair(
+    full: THREE.AnimationAction | null,
+    upper: THREE.AnimationAction | null,
+    timeScale: number,
+    startTime = 0,
+  ): void {
+    if (full) {
+      full.reset();
+      full.setLoop(THREE.LoopOnce, 1);
+      full.clampWhenFinished = true;
+      full.enabled = true;
+      full.timeScale = timeScale;
+      if (startTime > 0) {
+        full.time = Math.min(startTime, full.getClip().duration);
+      }
+      full.play();
+    }
+    if (upper) {
+      upper.reset();
+      upper.setLoop(THREE.LoopOnce, 1);
+      upper.clampWhenFinished = true;
+      upper.enabled = true;
+      upper.timeScale = timeScale;
+      if (startTime > 0) {
+        upper.time = Math.min(startTime, upper.getClip().duration);
+      }
+      upper.play();
+    }
+  }
 
   void loadOptionalGlbAsset('survivor').then((loaded) => {
     if (!loaded) {
@@ -1570,6 +1741,8 @@ export function createPlayerController(options: PlayerControllerOptions): Player
     const legacyJumpClip = !jumpStartClip ? findUniqueClip(clips, 'jump', usedClips, true) : null;
     const attackLeftClip = findUniqueClip(clips, 'attack_left', usedClips, true);
     const attackRightClip = findUniqueClip(clips, 'attack', usedClips, true, ['left']);
+    const pickaxeSwingClip = findUniqueClip(clips, 'pickaxe_swing', usedClips, true);
+    const axeSwingClip = findUniqueClip(clips, 'axe_swing', usedClips, true, ['pickaxe']);
     const throwClip = findUniqueClip(clips, 'throw', usedClips, true);
     if (!idleClip) {
       const firstUnused = clips.find((c) => !usedClips.has(c)) ?? null;
@@ -1634,6 +1807,14 @@ export function createPlayerController(options: PlayerControllerOptions): Player
     const attackLeftUpperAction = setupOneShotAction(
       filterClipByBodyRegion(attackLeftClip, 'upper', false),
     );
+    const axeSwingAction = setupOneShotAction(axeSwingClip);
+    const axeSwingUpperAction = setupOneShotAction(
+      filterClipByBodyRegion(axeSwingClip, 'upper', false),
+    );
+    const pickaxeSwingAction = setupOneShotAction(pickaxeSwingClip);
+    const pickaxeSwingUpperAction = setupOneShotAction(
+      filterClipByBodyRegion(pickaxeSwingClip, 'upper', false),
+    );
     const throwAction = setupOneShotAction(throwClip);
     const throwUpperAction = setupOneShotAction(filterClipByBodyRegion(throwClip, 'upper', false));
 
@@ -1682,18 +1863,27 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       handBone.getWorldScale(handWorldScale);
       const invHandScale =
         Number.isFinite(handWorldScale.x) && handWorldScale.x > 1e-4 ? 1 / handWorldScale.x : 1;
-      handTools.group.position.set(0, 0.045 * invHandScale, 0);
-      handTools.group.rotation.set(Math.PI * 0.5, 0, 0);
+      handTools.group.position.set(
+        HAND_TOOL_GRIP_OFFSET.x * invHandScale,
+        HAND_TOOL_GRIP_OFFSET.y * invHandScale,
+        HAND_TOOL_GRIP_OFFSET.z * invHandScale,
+      );
+      handTools.group.quaternion.set(
+        HAND_TOOL_GRIP_QUATERNION.x,
+        HAND_TOOL_GRIP_QUATERNION.y,
+        HAND_TOOL_GRIP_QUATERNION.z,
+        HAND_TOOL_GRIP_QUATERNION.w,
+      );
       handTools.group.scale.setScalar(invHandScale);
       handBone.add(handTools.group);
     } else {
       handTools.group.position.set(0.32, 0.96, -0.18);
-      handTools.group.rotation.set(0.85, 0, 0);
+      handTools.group.rotation.set(0.22, 0, 0);
       handTools.group.scale.setScalar(1);
       wrapper.add(handTools.group);
     }
 
-    // Resume any in-flight airborne, landing, throw, or melee action seamlessly if GLB loads mid-action
+    // Resume any in-flight airborne, landing, throw, or melee/tool action seamlessly if GLB loads mid-action
     if (isAirborne && jumpStartAction) {
       jumpStartAction.reset();
       jumpStartAction.setLoop(THREE.LoopOnce, 1);
@@ -1712,41 +1902,31 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       jumpLandAction.play();
     } else if (throwTimer > 0 && throwAction) {
       const throwTime = Math.min(throwElapsed * THROW_TIME_SCALE, throwAction.getClip().duration);
-      throwAction.reset();
-      throwAction.setLoop(THREE.LoopOnce, 1);
-      throwAction.clampWhenFinished = true;
-      throwAction.timeScale = THROW_TIME_SCALE;
-      throwAction.time = throwTime;
-      throwAction.play();
-      if (throwUpperAction) {
-        throwUpperAction.reset();
-        throwUpperAction.setLoop(THREE.LoopOnce, 1);
-        throwUpperAction.clampWhenFinished = true;
-        throwUpperAction.timeScale = THROW_TIME_SCALE;
-        throwUpperAction.time = Math.min(throwTime, throwUpperAction.getClip().duration);
-        throwUpperAction.play();
-      }
+      playCombatActionPair(throwAction, throwUpperAction, THROW_TIME_SCALE, throwTime);
     } else if (attackTimer > 0) {
-      const useLeft = activeAttackIsLeft && attackLeftAction !== null;
-      const activeAction = useLeft ? attackLeftAction : attackRightAction;
-      const activeUpperAction = useLeft ? attackLeftUpperAction : attackRightUpperAction;
+      let activeAction: THREE.AnimationAction | null = null;
+      let activeUpperAction: THREE.AnimationAction | null = null;
+      let scale = ATTACK_RIGHT_TIME_SCALE;
+      if (activeAttackKind === 'axe') {
+        activeAction = axeSwingAction ?? pickaxeSwingAction;
+        activeUpperAction = axeSwingUpperAction ?? pickaxeSwingUpperAction;
+        scale = axeSwingAction ? AXE_SWING_TIME_SCALE : PICKAXE_SWING_TIME_SCALE;
+      } else if (activeAttackKind === 'pickaxe') {
+        activeAction = pickaxeSwingAction ?? axeSwingAction;
+        activeUpperAction = pickaxeSwingUpperAction ?? axeSwingUpperAction;
+        scale = pickaxeSwingAction ? PICKAXE_SWING_TIME_SCALE : AXE_SWING_TIME_SCALE;
+      } else if (activeAttackKind === 'fists_left') {
+        activeAction = attackLeftAction ?? attackRightAction;
+        activeUpperAction = attackLeftUpperAction ?? attackRightUpperAction;
+        scale = attackLeftAction ? ATTACK_LEFT_TIME_SCALE : ATTACK_RIGHT_TIME_SCALE;
+      } else {
+        activeAction = attackRightAction;
+        activeUpperAction = attackRightUpperAction;
+        scale = ATTACK_RIGHT_TIME_SCALE;
+      }
       if (activeAction) {
-        const scale = useLeft ? ATTACK_LEFT_TIME_SCALE : ATTACK_RIGHT_TIME_SCALE;
         const atkTime = Math.min(attackElapsed * scale, activeAction.getClip().duration);
-        activeAction.reset();
-        activeAction.setLoop(THREE.LoopOnce, 1);
-        activeAction.clampWhenFinished = true;
-        activeAction.timeScale = scale;
-        activeAction.time = atkTime;
-        activeAction.play();
-        if (activeUpperAction) {
-          activeUpperAction.reset();
-          activeUpperAction.setLoop(THREE.LoopOnce, 1);
-          activeUpperAction.clampWhenFinished = true;
-          activeUpperAction.timeScale = scale;
-          activeUpperAction.time = Math.min(atkTime, activeUpperAction.getClip().duration);
-          activeUpperAction.play();
-        }
+        playCombatActionPair(activeAction, activeUpperAction, scale, atkTime);
       }
     }
 
@@ -1782,6 +1962,10 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       attackRightUpperAction,
       attackLeftAction,
       attackLeftUpperAction,
+      axeSwingAction,
+      axeSwingUpperAction,
+      pickaxeSwingAction,
+      pickaxeSwingUpperAction,
       throwAction,
       throwUpperAction,
       wIdle: 1,
@@ -1795,6 +1979,8 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       wJumpLand: 0,
       wAttackRight: 0,
       wAttackLeft: 0,
+      wAxeSwing: 0,
+      wPickaxeSwing: 0,
       wThrow: 0,
     };
   });
@@ -1880,35 +2066,18 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       glbState.wJumpLand = 0;
       glbState.wAttackRight = 0;
       glbState.wAttackLeft = 0;
+      glbState.wAxeSwing = 0;
+      glbState.wPickaxeSwing = 0;
       glbState.wThrow = 0;
       if (glbState.jumpLandAction) {
         glbState.jumpLandAction.stop();
         glbState.jumpLandAction.setEffectiveWeight(0);
       }
-      if (glbState.attackRightAction) {
-        glbState.attackRightAction.stop();
-        glbState.attackRightAction.setEffectiveWeight(0);
-      }
-      if (glbState.attackRightUpperAction) {
-        glbState.attackRightUpperAction.stop();
-        glbState.attackRightUpperAction.setEffectiveWeight(0);
-      }
-      if (glbState.attackLeftAction) {
-        glbState.attackLeftAction.stop();
-        glbState.attackLeftAction.setEffectiveWeight(0);
-      }
-      if (glbState.attackLeftUpperAction) {
-        glbState.attackLeftUpperAction.stop();
-        glbState.attackLeftUpperAction.setEffectiveWeight(0);
-      }
-      if (glbState.throwAction) {
-        glbState.throwAction.stop();
-        glbState.throwAction.setEffectiveWeight(0);
-      }
-      if (glbState.throwUpperAction) {
-        glbState.throwUpperAction.stop();
-        glbState.throwUpperAction.setEffectiveWeight(0);
-      }
+      stopCombatActionPair(glbState.attackRightAction, glbState.attackRightUpperAction);
+      stopCombatActionPair(glbState.attackLeftAction, glbState.attackLeftUpperAction);
+      stopCombatActionPair(glbState.axeSwingAction, glbState.axeSwingUpperAction);
+      stopCombatActionPair(glbState.pickaxeSwingAction, glbState.pickaxeSwingUpperAction);
+      stopCombatActionPair(glbState.throwAction, glbState.throwUpperAction);
       if (glbState.jumpStartAction) {
         glbState.jumpStartAction.reset();
         glbState.jumpStartAction.setLoop(THREE.LoopOnce, 1);
@@ -1933,11 +2102,21 @@ export function createPlayerController(options: PlayerControllerOptions): Player
     ) {
       return;
     }
-    activeAttackIsLeft = nextPunchLeft;
-    nextPunchLeft = !nextPunchLeft;
+    activeAttackKind = resolveAttackClipKind(equippedTool, nextPunchLeft);
+    if (equippedTool === 'fists') {
+      nextPunchLeft = !nextPunchLeft;
+    }
 
-    attackTimer = ATTACK_DURATION;
-    attackCooldown = ATTACK_COOLDOWN;
+    if (activeAttackKind === 'axe') {
+      attackTimer = AXE_ATTACK_DURATION;
+      attackCooldown = AXE_ATTACK_COOLDOWN;
+    } else if (activeAttackKind === 'pickaxe') {
+      attackTimer = PICKAXE_ATTACK_DURATION;
+      attackCooldown = PICKAXE_ATTACK_COOLDOWN;
+    } else {
+      attackTimer = ATTACK_DURATION;
+      attackCooldown = ATTACK_COOLDOWN;
+    }
     attackElapsed = 0;
     attackWhooshPending = true;
     if (onAttackStart) {
@@ -1945,45 +2124,38 @@ export function createPlayerController(options: PlayerControllerOptions): Player
     }
 
     if (glbState) {
-      const useLeft = activeAttackIsLeft && glbState.attackLeftAction !== null;
-      const activeAction = useLeft ? glbState.attackLeftAction : glbState.attackRightAction;
-      const activeUpperAction = useLeft
-        ? glbState.attackLeftUpperAction
-        : glbState.attackRightUpperAction;
-      const otherAction = useLeft ? glbState.attackRightAction : glbState.attackLeftAction;
-      const otherUpperAction = useLeft
-        ? glbState.attackRightUpperAction
-        : glbState.attackLeftUpperAction;
-      if (otherAction) {
-        otherAction.stop();
-        otherAction.setEffectiveWeight(0);
-      }
-      if (otherUpperAction) {
-        otherUpperAction.stop();
-        otherUpperAction.setEffectiveWeight(0);
-      }
-      if (useLeft) {
-        glbState.wAttackRight = 0;
+      glbState.wAttackRight = 0;
+      glbState.wAttackLeft = 0;
+      glbState.wAxeSwing = 0;
+      glbState.wPickaxeSwing = 0;
+      stopCombatActionPair(glbState.attackRightAction, glbState.attackRightUpperAction);
+      stopCombatActionPair(glbState.attackLeftAction, glbState.attackLeftUpperAction);
+      stopCombatActionPair(glbState.axeSwingAction, glbState.axeSwingUpperAction);
+      stopCombatActionPair(glbState.pickaxeSwingAction, glbState.pickaxeSwingUpperAction);
+
+      let activeAction: THREE.AnimationAction | null = null;
+      let activeUpperAction: THREE.AnimationAction | null = null;
+      let scale = ATTACK_RIGHT_TIME_SCALE;
+
+      if (activeAttackKind === 'axe') {
+        activeAction = glbState.axeSwingAction ?? glbState.pickaxeSwingAction;
+        activeUpperAction = glbState.axeSwingUpperAction ?? glbState.pickaxeSwingUpperAction;
+        scale = glbState.axeSwingAction ? AXE_SWING_TIME_SCALE : PICKAXE_SWING_TIME_SCALE;
+      } else if (activeAttackKind === 'pickaxe') {
+        activeAction = glbState.pickaxeSwingAction ?? glbState.axeSwingAction;
+        activeUpperAction = glbState.pickaxeSwingUpperAction ?? glbState.axeSwingUpperAction;
+        scale = glbState.pickaxeSwingAction ? PICKAXE_SWING_TIME_SCALE : AXE_SWING_TIME_SCALE;
+      } else if (activeAttackKind === 'fists_left') {
+        activeAction = glbState.attackLeftAction ?? glbState.attackRightAction;
+        activeUpperAction = glbState.attackLeftUpperAction ?? glbState.attackRightUpperAction;
+        scale = glbState.attackLeftAction ? ATTACK_LEFT_TIME_SCALE : ATTACK_RIGHT_TIME_SCALE;
       } else {
-        glbState.wAttackLeft = 0;
+        activeAction = glbState.attackRightAction;
+        activeUpperAction = glbState.attackRightUpperAction;
+        scale = ATTACK_RIGHT_TIME_SCALE;
       }
-      const scale = useLeft ? ATTACK_LEFT_TIME_SCALE : ATTACK_RIGHT_TIME_SCALE;
-      if (activeAction) {
-        activeAction.reset();
-        activeAction.setLoop(THREE.LoopOnce, 1);
-        activeAction.clampWhenFinished = true;
-        activeAction.enabled = true;
-        activeAction.timeScale = scale;
-        activeAction.play();
-      }
-      if (activeUpperAction) {
-        activeUpperAction.reset();
-        activeUpperAction.setLoop(THREE.LoopOnce, 1);
-        activeUpperAction.clampWhenFinished = true;
-        activeUpperAction.enabled = true;
-        activeUpperAction.timeScale = scale;
-        activeUpperAction.play();
-      }
+
+      playCombatActionPair(activeAction, activeUpperAction, scale);
     }
   };
 
@@ -2588,7 +2760,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       attackWhooshPending = false;
       attackCameraImpulse = 0;
       nextPunchLeft = false;
-      activeAttackIsLeft = false;
+      activeAttackKind = 'fists_right';
       throwTimer = 0;
       throwCooldown = 0;
       throwElapsed = 0;
@@ -2623,6 +2795,8 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         glbState.wJumpLand = 0;
         glbState.wAttackRight = 0;
         glbState.wAttackLeft = 0;
+        glbState.wAxeSwing = 0;
+        glbState.wPickaxeSwing = 0;
         glbState.wThrow = 0;
         if (glbState.idleLowerAction) {
           glbState.idleLowerAction.setEffectiveWeight(0);
@@ -2653,30 +2827,11 @@ export function createPlayerController(options: PlayerControllerOptions): Player
           glbState.jumpLandAction.stop();
           glbState.jumpLandAction.setEffectiveWeight(0);
         }
-        if (glbState.attackRightAction) {
-          glbState.attackRightAction.stop();
-          glbState.attackRightAction.setEffectiveWeight(0);
-        }
-        if (glbState.attackRightUpperAction) {
-          glbState.attackRightUpperAction.stop();
-          glbState.attackRightUpperAction.setEffectiveWeight(0);
-        }
-        if (glbState.attackLeftAction) {
-          glbState.attackLeftAction.stop();
-          glbState.attackLeftAction.setEffectiveWeight(0);
-        }
-        if (glbState.attackLeftUpperAction) {
-          glbState.attackLeftUpperAction.stop();
-          glbState.attackLeftUpperAction.setEffectiveWeight(0);
-        }
-        if (glbState.throwAction) {
-          glbState.throwAction.stop();
-          glbState.throwAction.setEffectiveWeight(0);
-        }
-        if (glbState.throwUpperAction) {
-          glbState.throwUpperAction.stop();
-          glbState.throwUpperAction.setEffectiveWeight(0);
-        }
+        stopCombatActionPair(glbState.attackRightAction, glbState.attackRightUpperAction);
+        stopCombatActionPair(glbState.attackLeftAction, glbState.attackLeftUpperAction);
+        stopCombatActionPair(glbState.axeSwingAction, glbState.axeSwingUpperAction);
+        stopCombatActionPair(glbState.pickaxeSwingAction, glbState.pickaxeSwingUpperAction);
+        stopCombatActionPair(glbState.throwAction, glbState.throwUpperAction);
       }
       updateStance('standing');
       initCameraTransform();
@@ -2699,7 +2854,13 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       if (attackTimer > 0) {
         attackElapsed += dt;
         attackTimer = Math.max(0, attackTimer - dt);
-        if (attackWhooshPending && attackElapsed >= ATTACK_WHOOSH_TIME) {
+        const currentHitTime =
+          activeAttackKind === 'axe'
+            ? 0.37
+            : activeAttackKind === 'pickaxe'
+              ? 0.41
+              : ATTACK_WHOOSH_TIME;
+        if (attackWhooshPending && attackElapsed >= currentHitTime) {
           attackWhooshPending = false;
           if (onAttack) {
             onAttack();
@@ -2708,9 +2869,10 @@ export function createPlayerController(options: PlayerControllerOptions): Player
             onAttackHitWindow(position.x, position.z, -Math.sin(characterYaw), -Math.cos(characterYaw));
           }
         }
-        // Subtle tactile shoulder-camera micro-impulse peaking across the punch arc
-        if (attackElapsed >= 0.14 && attackElapsed <= 0.48) {
-          const u = (attackElapsed - 0.14) / 0.34;
+        // Subtle tactile shoulder-camera micro-impulse peaking across the punch/chop/strike arc
+        const impulseStart = Math.max(0.05, currentHitTime - 0.05);
+        if (attackElapsed >= impulseStart && attackElapsed <= impulseStart + 0.34) {
+          const u = (attackElapsed - impulseStart) / 0.34;
           const s = Math.sin(u * Math.PI);
           attackCameraImpulse = s * s;
         } else {
@@ -2897,9 +3059,12 @@ export function createPlayerController(options: PlayerControllerOptions): Player
           }
 
           if (attackTimer > 0) {
-            // Snappily align torso toward camera aim and step physically into stationary brawling punches
+            // Snappily align torso toward camera aim; step forward ONLY for bare-fists brawling punches
+            // so chopping trees or mining rocks keeps the survivor planted cleanly without clipping into targets
             characterYaw = lerpAngle(characterYaw, cameraYaw, Math.min(1, dt * 18));
-            if (attackElapsed >= 0.05 && attackElapsed <= 0.27) {
+            const isFistPunch =
+              activeAttackKind === 'fists_right' || activeAttackKind === 'fists_left';
+            if (isFistPunch && attackElapsed >= 0.05 && attackElapsed <= 0.27) {
               const lungeU = (attackElapsed - 0.05) / 0.22;
               const lungeSpeed = Math.sin(lungeU * Math.PI) * 1.65;
               scratchPos2D.x = position.x - Math.sin(characterYaw) * lungeSpeed * dt;
@@ -3164,15 +3329,33 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         glbState.wJumpLand += (targetJumpLand - glbState.wJumpLand) * jlAlpha;
         if (glbState.wJumpLand < 0.001 && targetJumpLand === 0) glbState.wJumpLand = 0;
 
-        // Alternating right-cross & left-jab punch envelopes (~0.09s ramp-in, 0.20s recovery)
+        // Tool-aware combat/harvesting envelopes: axe chop, pickaxe mine, right cross, or left jab
         let targetAttackRight = 0;
         let targetAttackLeft = 0;
+        let targetAxeSwing = 0;
+        let targetPickaxeSwing = 0;
         if (attackTimer > 0 && !isAirborne) {
           const fadeIn = clamp(attackElapsed / 0.09, 0, 1);
           const fadeOut = clamp(attackTimer / 0.2, 0, 1);
           const atkEnv = Math.min(fadeIn, fadeOut);
-          if (activeAttackIsLeft && glbState.attackLeftAction) {
-            targetAttackLeft = atkEnv;
+          if (activeAttackKind === 'axe') {
+            if (glbState.axeSwingAction) {
+              targetAxeSwing = atkEnv;
+            } else if (glbState.pickaxeSwingAction) {
+              targetPickaxeSwing = atkEnv;
+            }
+          } else if (activeAttackKind === 'pickaxe') {
+            if (glbState.pickaxeSwingAction) {
+              targetPickaxeSwing = atkEnv;
+            } else if (glbState.axeSwingAction) {
+              targetAxeSwing = atkEnv;
+            }
+          } else if (activeAttackKind === 'fists_left') {
+            if (glbState.attackLeftAction) {
+              targetAttackLeft = atkEnv;
+            } else if (glbState.attackRightAction) {
+              targetAttackRight = atkEnv;
+            }
           } else if (glbState.attackRightAction) {
             targetAttackRight = atkEnv;
           }
@@ -3182,6 +3365,10 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         if (glbState.wAttackRight < 0.001 && targetAttackRight === 0) glbState.wAttackRight = 0;
         glbState.wAttackLeft += (targetAttackLeft - glbState.wAttackLeft) * attackAlpha;
         if (glbState.wAttackLeft < 0.001 && targetAttackLeft === 0) glbState.wAttackLeft = 0;
+        glbState.wAxeSwing += (targetAxeSwing - glbState.wAxeSwing) * attackAlpha;
+        if (glbState.wAxeSwing < 0.001 && targetAxeSwing === 0) glbState.wAxeSwing = 0;
+        glbState.wPickaxeSwing += (targetPickaxeSwing - glbState.wPickaxeSwing) * attackAlpha;
+        if (glbState.wPickaxeSwing < 0.001 && targetPickaxeSwing === 0) glbState.wPickaxeSwing = 0;
 
         // Overhand bottle-throw envelope (~0.08s ramp-in, 0.16s follow-through blend-out)
         let targetThrow = 0;
@@ -3194,7 +3381,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         glbState.wThrow += (targetThrow - glbState.wThrow) * throwAlpha;
         if (glbState.wThrow < 0.001 && targetThrow === 0) glbState.wThrow = 0;
 
-        // Exact upper-body / lower-body split masking so moving punches/throws stride cleanly with zero foot-sliding
+        // Exact upper-body / lower-body split masking so moving swings/punches/throws stride with zero foot-sliding
         const rawJumpSum = glbState.wJumpStart + glbState.wJumpAir + glbState.wJumpLand;
         const invJump = rawJumpSum > 1 ? 1 / rawJumpSum : 1;
         const effJumpStart = glbState.wJumpStart * invJump;
@@ -3205,25 +3392,36 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         const airSuppress = Math.max(0, 1 - jumpSum);
         let cRight = glbState.wAttackRight * airSuppress;
         let cLeft = glbState.wAttackLeft * airSuppress;
+        let cAxe = glbState.wAxeSwing * airSuppress;
+        let cPickaxe = glbState.wPickaxeSwing * airSuppress;
         let cThrow = glbState.wThrow * airSuppress;
-        const rawCombatSum = cRight + cLeft + cThrow;
+        const rawCombatSum = cRight + cLeft + cAxe + cPickaxe + cThrow;
         if (rawCombatSum > airSuppress && rawCombatSum > 1e-6) {
           const combatNorm = airSuppress / rawCombatSum;
           cRight *= combatNorm;
           cLeft *= combatNorm;
+          cAxe *= combatNorm;
+          cPickaxe *= combatNorm;
           cThrow *= combatNorm;
         }
-        const combatSum = cRight + cLeft + cThrow;
+        const combatSum = cRight + cLeft + cAxe + cPickaxe + cThrow;
 
         const hasLowerLoco =
           glbState.idleLowerAction !== null || glbState.walkLowerAction !== null;
         const moveMask = hasLowerLoco ? clamp((s - 0.3) / 1.05, 0, 1) : 0;
         const rightMask = glbState.attackRightUpperAction ? moveMask : 0;
         const leftMask = glbState.attackLeftUpperAction ? moveMask : 0;
+        const axeMask = glbState.axeSwingUpperAction ? moveMask : 0;
+        const pickaxeMask = glbState.pickaxeSwingUpperAction ? moveMask : 0;
         const throwMask = glbState.throwUpperAction ? moveMask : 0;
 
         const fullLocoScale = Math.max(0, 1 - jumpSum - combatSum);
-        const lowerLocoScale = cRight * rightMask + cLeft * leftMask + cThrow * throwMask;
+        const lowerLocoScale =
+          cRight * rightMask +
+          cLeft * leftMask +
+          cAxe * axeMask +
+          cPickaxe * pickaxeMask +
+          cThrow * throwMask;
 
         if (glbState.idleAction) {
           glbState.idleAction.setEffectiveWeight(glbState.wIdle * fullLocoScale);
@@ -3303,6 +3501,18 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         if (glbState.attackLeftUpperAction) {
           glbState.attackLeftUpperAction.setEffectiveWeight(cLeft * leftMask);
         }
+        if (glbState.axeSwingAction) {
+          glbState.axeSwingAction.setEffectiveWeight(cAxe * (1 - axeMask));
+        }
+        if (glbState.axeSwingUpperAction) {
+          glbState.axeSwingUpperAction.setEffectiveWeight(cAxe * axeMask);
+        }
+        if (glbState.pickaxeSwingAction) {
+          glbState.pickaxeSwingAction.setEffectiveWeight(cPickaxe * (1 - pickaxeMask));
+        }
+        if (glbState.pickaxeSwingUpperAction) {
+          glbState.pickaxeSwingUpperAction.setEffectiveWeight(cPickaxe * pickaxeMask);
+        }
         if (glbState.throwAction) {
           glbState.throwAction.setEffectiveWeight(cThrow * (1 - throwMask));
         }
@@ -3339,25 +3549,42 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       rig.hips.rotation.y = swing * 0.065;
       rig.hips.rotation.z = idleWeightShift * 1.1;
 
-      const attackPhase = attackTimer > 0 ? clamp(attackElapsed / ATTACK_DURATION, 0, 1) : 0;
+      const currentAttackDuration =
+        activeAttackKind === 'axe'
+          ? AXE_ATTACK_DURATION
+          : activeAttackKind === 'pickaxe'
+            ? PICKAXE_ATTACK_DURATION
+            : ATTACK_DURATION;
+      const attackPhase = attackTimer > 0 ? clamp(attackElapsed / currentAttackDuration, 0, 1) : 0;
       const attackSlash =
         attackTimer > 0 ? Math.sin(clamp((attackPhase - 0.12) / 0.55, 0, 1) * Math.PI) : 0;
       const throwPhase = throwTimer > 0 ? clamp(throwElapsed / THROW_DURATION, 0, 1) : 0;
       const throwArc = throwTimer > 0 ? Math.sin(throwPhase * Math.PI) : 0;
-      const punchSideSign = activeAttackIsLeft ? -1 : 1;
+      const isLeftPunch = activeAttackKind === 'fists_left';
+      const punchSideSign = isLeftPunch ? -1 : 1;
 
       // Living upper-chest breathing lift & counter-rotating torso twist during walk/sprint/attack/throw
       rig.chestUpper.position.y = breathe * 0.35;
+      const pickaxeTorsoPitch =
+        attackTimer > 0 && activeAttackKind === 'pickaxe'
+          ? -0.22 + attackSlash * 0.62
+          : attackSlash * 0.24;
+      const axeTorsoYaw =
+        attackTimer > 0 && activeAttackKind === 'axe'
+          ? -0.58 + attackSlash * 1.24
+          : attackTimer > 0 && activeAttackKind === 'pickaxe'
+            ? -0.18 + attackSlash * 0.26
+            : attackTimer > 0
+              ? (-0.32 + attackSlash * 0.85) * punchSideSign
+              : 0;
       rig.torso.rotation.x = -(
         crouchBlend * 0.32 +
         (isSprinting ? 0.16 : 0.03) * clamp(speedNorm, 0, 1) +
-        attackSlash * 0.24 +
+        pickaxeTorsoPitch +
         throwArc * 0.18
       );
       rig.torso.rotation.y =
-        -swing * 0.11 +
-        (attackTimer > 0 ? (-0.32 + attackSlash * 0.85) * punchSideSign : 0) +
-        (throwTimer > 0 ? -0.45 + throwPhase * 0.95 : 0);
+        -swing * 0.11 + axeTorsoYaw + (throwTimer > 0 ? -0.45 + throwPhase * 0.95 : 0);
       rig.torso.rotation.z = -idleWeightShift * 0.8;
 
       // Subtle living head gaze tracking camera orientation gently
@@ -3384,9 +3611,9 @@ export function createPlayerController(options: PlayerControllerOptions): Player
       rig.leftBoot.rotation.x = -(leftHipRot + leftKneeRot) * 0.85;
       rig.rightBoot.rotation.x = -(rightHipRot + rightKneeRot) * 0.85;
 
-      // Left arm natural swing, or left jab when activeAttackIsLeft
+      // Left arm natural swing, or left jab when fists_left
       const armAmp = isCrouching ? 0.24 : isSprinting ? 0.64 : 0.36;
-      if (attackTimer > 0 && activeAttackIsLeft) {
+      if (attackTimer > 0 && isLeftPunch) {
         rig.leftArm.rotation.x = 1.5 - attackSlash * 2.05;
         rig.leftArm.rotation.z = -0.28 + attackSlash * 0.52;
         rig.leftForearm.rotation.x = 0.68 - attackSlash * 0.45;
@@ -3396,7 +3623,7 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         rig.leftForearm.rotation.x = 0.24 + Math.max(0, -swing) * 0.34 + crouchBlend * 0.22;
       }
 
-      // Right arm: resting axe, right cross punch, or overhand bottle throw arc
+      // Right arm: resting axe, horizontal axe chop, overhead pickaxe mine, right cross punch, or bottle throw
       const wantAxeOnShoulder =
         !isSprinting && !isCrouching && !isAirborne && attackTimer <= 0 && throwTimer <= 0;
       axeShoulderBlend += ((wantAxeOnShoulder ? 1 : 0) - axeShoulderBlend) * Math.min(1, dt * 7);
@@ -3418,7 +3645,21 @@ export function createPlayerController(options: PlayerControllerOptions): Player
         rig.rightForearm.rotation.x = 0.95 - throwPhase * 0.72;
         rig.rightForearm.rotation.z = 0;
         rig.axePivot.rotation.set(1.25, 0.08, 0.12);
-      } else if (attackTimer > 0 && !activeAttackIsLeft) {
+      } else if (attackTimer > 0 && activeAttackKind === 'axe') {
+        // Horizontal-diagonal lumberjack axe chop sweeping from right shoulder across trunk
+        rig.rightArm.rotation.x = 0.82 - attackSlash * 0.45;
+        rig.rightArm.rotation.z = 1.18 - attackSlash * 1.65;
+        rig.rightForearm.rotation.x = 0.62 - attackSlash * 0.28;
+        rig.rightForearm.rotation.z = 0;
+        rig.axePivot.rotation.set(1.38 - attackSlash * 0.24, 0.22, -0.42 + attackSlash * 0.65);
+      } else if (attackTimer > 0 && activeAttackKind === 'pickaxe') {
+        // High overhead mining pickaxe windup driving straight downward into granite outcrop
+        rig.rightArm.rotation.x = 2.48 - attackSlash * 2.92;
+        rig.rightArm.rotation.z = 0.24 - attackSlash * 0.18;
+        rig.rightForearm.rotation.x = 0.85 - attackSlash * 0.58;
+        rig.rightForearm.rotation.z = 0;
+        rig.axePivot.rotation.set(1.05 + attackSlash * 0.48, 0.04, 0.08);
+      } else if (attackTimer > 0 && !isLeftPunch) {
         rig.rightArm.rotation.x = 1.65 - attackSlash * 2.15;
         rig.rightArm.rotation.z = 0.35 - attackSlash * 0.65;
         rig.rightForearm.rotation.x = 0.72 - attackSlash * 0.42;

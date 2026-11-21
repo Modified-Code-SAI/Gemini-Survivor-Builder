@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { createDouglasFirCanopyGeometry } from '../world/environment';
+import type { ChoppableForestController, ChoppableTreeTarget } from '../world/environment';
 import { getTerrainHeight, type Obstacle } from '../world/terrain';
 import { getWorldTextureAtlas } from '../world/textures';
 import type { LootBundle } from './survival';
@@ -29,6 +29,7 @@ export interface HarvestHitResult {
 
 export interface HarvestSystemOptions {
   readonly obstacles: Obstacle[];
+  readonly forest?: ChoppableForestController;
 }
 
 export interface HarvestSystem {
@@ -52,23 +53,7 @@ export interface HarvestSystem {
   dispose(): void;
 }
 
-export const HARVEST_NODE_SPECS: readonly HarvestNodeSpec[] = [
-  // 14 Harvestable Pacific Northwest Timber Pines (3 hits -> 2 + 2 + 6 = 10 Wood)
-  { id: 'tree_overlook_w1', kind: 'tree', x: -8.8, z: 15.8, scale: 1.0, rotY: 0.4 },
-  { id: 'tree_overlook_w2', kind: 'tree', x: -13.8, z: 16.4, scale: 1.08, rotY: 1.7 },
-  { id: 'tree_overlook_e1', kind: 'tree', x: 13.2, z: 16.4, scale: 0.96, rotY: 2.5 },
-  { id: 'tree_bunker_w1', kind: 'tree', x: -16.2, z: 5.4, scale: 1.12, rotY: 0.9 },
-  { id: 'tree_bunker_n1', kind: 'tree', x: -14.6, z: -4.4, scale: 1.04, rotY: 3.1 },
-  { id: 'tree_mid_w1', kind: 'tree', x: -9.4, z: -9.8, scale: 0.95, rotY: 4.2 },
-  { id: 'tree_mid_w2', kind: 'tree', x: -14.8, z: -15.6, scale: 1.1, rotY: 5.1 },
-  { id: 'tree_east_s1', kind: 'tree', x: 12.6, z: 6.2, scale: 1.02, rotY: 1.3 },
-  { id: 'tree_gas_e1', kind: 'tree', x: 22.2, z: -5.2, scale: 1.08, rotY: 2.8 },
-  { id: 'tree_gas_n1', kind: 'tree', x: 14.2, z: -19.6, scale: 1.05, rotY: 0.6 },
-  { id: 'tree_valley_w1', kind: 'tree', x: -11.8, z: -26.5, scale: 1.06, rotY: 3.9 },
-  { id: 'tree_valley_e1', kind: 'tree', x: 14.2, z: -27.4, scale: 0.98, rotY: 5.4 },
-  { id: 'tree_north_w1', kind: 'tree', x: -11.4, z: -36.5, scale: 1.1, rotY: 2.1 },
-  { id: 'tree_north_e1', kind: 'tree', x: 10.2, z: -37.2, scale: 1.0, rotY: 4.7 },
-
+export const HARVEST_ROCK_SPECS: readonly HarvestNodeSpec[] = [
   // 10 Harvestable Mossy Stone Outcrops (3 hits -> 2 + 2 + (5 Stone + 1 Scrap) = 9 Stone + 1 Scrap)
   { id: 'rock_overlook_w1', kind: 'rock', x: -9.4, z: 12.6, scale: 1.0, rotY: 0.8 },
   { id: 'rock_overlook_e1', kind: 'rock', x: 10.8, z: 9.2, scale: 0.95, rotY: 2.2 },
@@ -82,34 +67,27 @@ export const HARVEST_NODE_SPECS: readonly HarvestNodeSpec[] = [
   { id: 'rock_north_w1', kind: 'rock', x: -10.2, z: -32.6, scale: 1.02, rotY: 1.1 },
 ];
 
+export const HARVEST_NODE_SPECS: readonly HarvestNodeSpec[] = HARVEST_ROCK_SPECS;
+
 const MAX_HITS_PER_NODE = 3;
-const TREE_STANDING_RADIUS = 0.46;
-const TREE_STUMP_RADIUS = 0.34;
 const ROCK_RADIUS = 0.68;
 const HARVEST_REACH = 2.75;
 const BURST_POOL_SIZE = 5;
 const BURST_PARTICLES = 16;
 const BURST_DURATION = 0.52;
-const FALL_TARGET_ANGLE = 1.46;
 
-interface HarvestNodeRuntime {
+interface RockNodeRuntime {
   readonly spec: HarvestNodeSpec;
   readonly group: THREE.Group;
   readonly mainPivot: THREE.Group;
   readonly baseY: number;
   readonly standingObstacle: Obstacle;
-  readonly stumpObstacle: Obstacle | null;
   activeObstacle: Obstacle | null;
   hitsRemaining: number;
   depleted: boolean;
   shakeTimer: number;
   shakeDirX: number;
   shakeDirZ: number;
-  falling: boolean;
-  fallAngle: number;
-  fallVel: number;
-  fallYaw: number;
-  fallLinger: number;
 }
 
 interface ChipBurst {
@@ -144,7 +122,7 @@ function createDisplacedRockGeometry(radius: number, seed: number): THREE.Buffer
 }
 
 export function createHarvestSystem(options: HarvestSystemOptions): HarvestSystem {
-  const { obstacles } = options;
+  const { obstacles, forest } = options;
   const root = new THREE.Group();
   root.name = 'HarvestableResourceNodes';
 
@@ -161,44 +139,7 @@ export function createHarvestSystem(options: HarvestSystemOptions): HarvestSyste
     return m;
   };
 
-  // Shared PBR timber & stone materials (never double-disposing WorldTextureAtlas textures)
-  const barkMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: 0x7b5c42,
-      roughness: 0.94,
-      metalness: 0.02,
-      map: atlas?.pineBark.map ?? null,
-      normalMap: atlas?.pineBark.normalMap ?? null,
-      roughnessMap: atlas?.pineBark.roughnessMap ?? null,
-    }),
-  );
-  const stumpCoreMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: 0xc99f67,
-      roughness: 0.86,
-      metalness: 0.02,
-    }),
-  );
-  const blazeMarkMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: 0xa4793c,
-      roughness: 0.92,
-      metalness: 0.02,
-      normalMap: atlas?.pineBark.normalMap ?? null,
-    }),
-  );
-  const boughMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      map: atlas?.pineBough.map ?? null,
-      normalMap: atlas?.pineBough.normalMap ?? null,
-      normalScale: new THREE.Vector2(0.95, 0.95),
-      alphaTest: 0.38,
-      roughness: 0.86,
-      metalness: 0.02,
-      vertexColors: true,
-      side: THREE.DoubleSide,
-    }),
-  );
+  // Shared PBR stone materials (never double-disposing WorldTextureAtlas textures)
   const rockMat = trackMat(
     new THREE.MeshStandardMaterial({
       color: 0x80877f,
@@ -218,21 +159,14 @@ export function createHarvestSystem(options: HarvestSystemOptions): HarvestSyste
     }),
   );
 
-  // Shared geometries for harvestable Timber Pines (photorealistic alpha-cutout Douglas Fir canopy)
-  const stumpGeo = trackGeo(new THREE.CylinderGeometry(0.28, 0.39, 0.48, 9));
-  const stumpTopGeo = trackGeo(new THREE.CylinderGeometry(0.275, 0.275, 0.02, 9));
-  const trunkGeo = trackGeo(new THREE.CylinderGeometry(0.11, 0.28, 6.2, 9));
-  const blazeRingGeo = trackGeo(new THREE.CylinderGeometry(0.258, 0.264, 0.075, 9));
-  const canopyGeo = trackGeo(createDouglasFirCanopyGeometry());
-
   // Shared displaced granite rock geometries
   const rockMainGeo = trackGeo(createDisplacedRockGeometry(0.66, 1.7));
   const rockSideGeo = trackGeo(createDisplacedRockGeometry(0.42, 4.3));
   const rockShardGeo = trackGeo(createDisplacedRockGeometry(0.26, 7.1));
 
-  const nodes: HarvestNodeRuntime[] = [];
+  const rockNodes: RockNodeRuntime[] = [];
 
-  function setNodeObstacle(node: HarvestNodeRuntime, next: Obstacle | null): void {
+  function setNodeObstacle(node: RockNodeRuntime, next: Obstacle | null): void {
     if (node.activeObstacle === next) {
       return;
     }
@@ -249,8 +183,8 @@ export function createHarvestSystem(options: HarvestSystemOptions): HarvestSyste
     }
   }
 
-  for (let i = 0; i < HARVEST_NODE_SPECS.length; i += 1) {
-    const spec = HARVEST_NODE_SPECS[i];
+  for (let i = 0; i < HARVEST_ROCK_SPECS.length; i += 1) {
+    const spec = HARVEST_ROCK_SPECS[i];
     if (!spec) {
       continue;
     }
@@ -259,136 +193,53 @@ export function createHarvestSystem(options: HarvestSystemOptions): HarvestSyste
     group.position.set(spec.x, baseY, spec.z);
     group.rotation.y = spec.rotY;
 
-    if (spec.kind === 'tree') {
-      // Permanent cut stump at ground base (revealed cleanly when felled)
-      const stump = new THREE.Mesh(stumpGeo, barkMat);
-      stump.position.set(0, 0.2, 0);
-      stump.scale.setScalar(spec.scale);
-      stump.castShadow = true;
-      stump.receiveShadow = true;
-      group.add(stump);
+    const mainPivot = new THREE.Group();
+    mainPivot.scale.setScalar(spec.scale);
 
-      const stumpTop = new THREE.Mesh(stumpTopGeo, stumpCoreMat);
-      stumpTop.position.set(0, 0.435 * spec.scale, 0);
-      stumpTop.scale.setScalar(spec.scale);
-      stumpTop.receiveShadow = true;
-      group.add(stumpTop);
+    const mainBoulder = new THREE.Mesh(rockMainGeo, rockMat);
+    mainBoulder.position.set(0, 0.36, 0);
+    mainBoulder.castShadow = true;
+    mainBoulder.receiveShadow = true;
+    mainPivot.add(mainBoulder);
 
-      // Upper trunk & tiered Pacific pine boughs pivoted at stump cut height (YXZ order avoids diagonal topple skew)
-      const mainPivot = new THREE.Group();
-      mainPivot.rotation.order = 'YXZ';
-      mainPivot.position.set(0, 0.42 * spec.scale, 0);
-      mainPivot.scale.setScalar(spec.scale);
+    const sideBoulder = new THREE.Mesh(rockSideGeo, rockMat);
+    sideBoulder.position.set(0.46, 0.22, 0.24);
+    sideBoulder.rotation.set(0.2, 1.1, -0.15);
+    sideBoulder.castShadow = true;
+    sideBoulder.receiveShadow = true;
+    mainPivot.add(sideBoulder);
 
-      const trunk = new THREE.Mesh(trunkGeo, barkMat);
-      trunk.position.set(0, 3.05, 0);
-      trunk.castShadow = true;
-      trunk.receiveShadow = true;
-      mainPivot.add(trunk);
+    const veinCluster = new THREE.Mesh(rockShardGeo, quartzVeinMat);
+    veinCluster.position.set(-0.34, 0.26, -0.22);
+    veinCluster.rotation.set(-0.25, 0.6, 0.35);
+    veinCluster.castShadow = true;
+    veinCluster.receiveShadow = true;
+    mainPivot.add(veinCluster);
 
-      // Subtle weathered ochre surveyor band so harvestable timber pines read naturally in the woods
-      const blaze = new THREE.Mesh(blazeRingGeo, blazeMarkMat);
-      blaze.position.set(0, 0.82, 0);
-      mainPivot.add(blaze);
+    group.add(mainPivot);
+    root.add(group);
 
-      const canopy = new THREE.Mesh(canopyGeo, boughMat);
-      canopy.position.set(0, -0.15, 0);
-      canopy.scale.set(7.8, 7.6, 7.8);
-      canopy.castShadow = true;
-      canopy.receiveShadow = true;
-      mainPivot.add(canopy);
-
-      group.add(mainPivot);
-      root.add(group);
-
-      const standingObstacle: Obstacle = {
-        kind: 'circle',
-        x: spec.x,
-        z: spec.z,
-        radius: TREE_STANDING_RADIUS * spec.scale,
-      };
-      const stumpObstacle: Obstacle = {
-        kind: 'circle',
-        x: spec.x,
-        z: spec.z,
-        radius: TREE_STUMP_RADIUS * spec.scale,
-      };
-      const runtime: HarvestNodeRuntime = {
-        spec,
-        group,
-        mainPivot,
-        baseY,
-        standingObstacle,
-        stumpObstacle,
-        activeObstacle: null,
-        hitsRemaining: MAX_HITS_PER_NODE,
-        depleted: false,
-        shakeTimer: 0,
-        shakeDirX: 0,
-        shakeDirZ: -1,
-        falling: false,
-        fallAngle: 0,
-        fallVel: 0,
-        fallYaw: 0,
-        fallLinger: 0,
-      };
-      setNodeObstacle(runtime, standingObstacle);
-      nodes.push(runtime);
-    } else {
-      const mainPivot = new THREE.Group();
-      mainPivot.scale.setScalar(spec.scale);
-
-      const mainBoulder = new THREE.Mesh(rockMainGeo, rockMat);
-      mainBoulder.position.set(0, 0.36, 0);
-      mainBoulder.castShadow = true;
-      mainBoulder.receiveShadow = true;
-      mainPivot.add(mainBoulder);
-
-      const sideBoulder = new THREE.Mesh(rockSideGeo, rockMat);
-      sideBoulder.position.set(0.46, 0.22, 0.24);
-      sideBoulder.rotation.set(0.2, 1.1, -0.15);
-      sideBoulder.castShadow = true;
-      sideBoulder.receiveShadow = true;
-      mainPivot.add(sideBoulder);
-
-      const veinCluster = new THREE.Mesh(rockShardGeo, quartzVeinMat);
-      veinCluster.position.set(-0.34, 0.26, -0.22);
-      veinCluster.rotation.set(-0.25, 0.6, 0.35);
-      veinCluster.castShadow = true;
-      veinCluster.receiveShadow = true;
-      mainPivot.add(veinCluster);
-
-      group.add(mainPivot);
-      root.add(group);
-
-      const standingObstacle: Obstacle = {
-        kind: 'circle',
-        x: spec.x,
-        z: spec.z,
-        radius: ROCK_RADIUS * spec.scale,
-      };
-      const runtime: HarvestNodeRuntime = {
-        spec,
-        group,
-        mainPivot,
-        baseY,
-        standingObstacle,
-        stumpObstacle: null,
-        activeObstacle: null,
-        hitsRemaining: MAX_HITS_PER_NODE,
-        depleted: false,
-        shakeTimer: 0,
-        shakeDirX: 0,
-        shakeDirZ: -1,
-        falling: false,
-        fallAngle: 0,
-        fallVel: 0,
-        fallYaw: 0,
-        fallLinger: 0,
-      };
-      setNodeObstacle(runtime, standingObstacle);
-      nodes.push(runtime);
-    }
+    const standingObstacle: Obstacle = {
+      kind: 'circle',
+      x: spec.x,
+      z: spec.z,
+      radius: ROCK_RADIUS * spec.scale,
+    };
+    const runtime: RockNodeRuntime = {
+      spec,
+      group,
+      mainPivot,
+      baseY,
+      standingObstacle,
+      activeObstacle: null,
+      hitsRemaining: MAX_HITS_PER_NODE,
+      depleted: false,
+      shakeTimer: 0,
+      shakeDirX: 0,
+      shakeDirZ: -1,
+    };
+    setNodeObstacle(runtime, standingObstacle);
+    rockNodes.push(runtime);
   }
 
   // Pre-allocated wood-chip & stone-shard burst pool (ZERO per-frame heap allocations!)
@@ -466,20 +317,19 @@ export function createHarvestSystem(options: HarvestSystemOptions): HarvestSyste
     const nx = fwdX / fLen;
     const nz = fwdZ / fLen;
 
-    let bestNode: HarvestNodeRuntime | null = null;
+    let bestRock: RockNodeRuntime | null = null;
+    let bestForestTree: ChoppableTreeTarget | null = null;
     let bestScore = Infinity;
 
-    for (let i = 0; i < nodes.length; i += 1) {
-      const node = nodes[i];
+    for (let i = 0; i < rockNodes.length; i += 1) {
+      const node = rockNodes[i];
       if (!node || node.depleted) {
         continue;
       }
       const dx = node.spec.x - playerX;
       const dz = node.spec.z - playerZ;
       const dist = Math.hypot(dx, dz);
-      const maxReach =
-        HARVEST_REACH +
-        (node.spec.kind === 'rock' ? ROCK_RADIUS : TREE_STANDING_RADIUS) * node.spec.scale * 0.45;
+      const maxReach = HARVEST_REACH + ROCK_RADIUS * node.spec.scale * 0.45;
       if (dist > maxReach) {
         continue;
       }
@@ -490,11 +340,81 @@ export function createHarvestSystem(options: HarvestSystemOptions): HarvestSyste
       const score = dist - dot * 0.7;
       if (score < bestScore) {
         bestScore = score;
-        bestNode = node;
+        bestRock = node;
       }
     }
 
-    if (!bestNode) {
+    if (forest) {
+      const forestTrees = forest.getTargets();
+      for (let i = 0; i < forestTrees.length; i += 1) {
+        const tree = forestTrees[i];
+        if (!tree || tree.depleted) {
+          continue;
+        }
+        const dx = tree.x - playerX;
+        const dz = tree.z - playerZ;
+        const dist = Math.hypot(dx, dz);
+        const maxReach = HARVEST_REACH + tree.radius * 0.45;
+        if (dist > maxReach) {
+          continue;
+        }
+        const dot = dist > 1e-4 ? (dx * nx + dz * nz) / dist : 1;
+        if (dot < 0.32) {
+          continue;
+        }
+        const score = dist - dot * 0.7;
+        if (score < bestScore) {
+          bestScore = score;
+          bestForestTree = tree;
+          bestRock = null;
+        }
+      }
+    }
+
+    if (bestForestTree && forest) {
+      const awayX = bestForestTree.x - playerX;
+      const awayZ = bestForestTree.z - playerZ;
+      const awayLen = Math.hypot(awayX, awayZ) || 1;
+      const dirX = awayX / awayLen;
+      const dirZ = awayZ / awayLen;
+
+      if (tool !== 'axe') {
+        forest.shakeTree(bestForestTree.id, dirX, dirZ);
+        return {
+          hit: true,
+          wrongTool: true,
+          neededTool: 'axe',
+          kind: 'tree',
+          depleted: false,
+          hitX: bestForestTree.x,
+          hitZ: bestForestTree.z,
+        };
+      }
+
+      const chopRes = forest.chopTree(bestForestTree.id, dirX, dirZ, obstacles);
+      if (!chopRes.hit) {
+        return {
+          hit: false,
+          wrongTool: false,
+          depleted: false,
+          hitX: playerX,
+          hitZ: playerZ,
+        };
+      }
+
+      spawnChipBurst(bestForestTree.x, chopRes.hitY, bestForestTree.z, 'tree');
+      return {
+        hit: true,
+        wrongTool: false,
+        kind: 'tree',
+        depleted: chopRes.depleted,
+        loot: { wood: chopRes.woodYield },
+        hitX: bestForestTree.x,
+        hitZ: bestForestTree.z,
+      };
+    }
+
+    if (!bestRock) {
       return {
         hit: false,
         wrongTool: false,
@@ -504,82 +424,58 @@ export function createHarvestSystem(options: HarvestSystemOptions): HarvestSyste
       };
     }
 
-    const neededTool: 'axe' | 'pickaxe' = bestNode.spec.kind === 'tree' ? 'axe' : 'pickaxe';
-    const awayX = bestNode.spec.x - playerX;
-    const awayZ = bestNode.spec.z - playerZ;
+    const awayX = bestRock.spec.x - playerX;
+    const awayZ = bestRock.spec.z - playerZ;
     const awayLen = Math.hypot(awayX, awayZ) || 1;
 
-    if (tool !== neededTool) {
-      bestNode.shakeTimer = 0.16;
-      bestNode.shakeDirX = awayX / awayLen;
-      bestNode.shakeDirZ = awayZ / awayLen;
+    if (tool !== 'pickaxe') {
+      bestRock.shakeTimer = 0.16;
+      bestRock.shakeDirX = awayX / awayLen;
+      bestRock.shakeDirZ = awayZ / awayLen;
       return {
         hit: true,
         wrongTool: true,
-        neededTool,
-        kind: bestNode.spec.kind,
+        neededTool: 'pickaxe',
+        kind: 'rock',
         depleted: false,
-        hitX: bestNode.spec.x,
-        hitZ: bestNode.spec.z,
+        hitX: bestRock.spec.x,
+        hitZ: bestRock.spec.z,
       };
     }
 
-    bestNode.hitsRemaining = Math.max(0, bestNode.hitsRemaining - 1);
-    bestNode.shakeTimer = 0.28;
-    bestNode.shakeDirX = awayX / awayLen;
-    bestNode.shakeDirZ = awayZ / awayLen;
+    bestRock.hitsRemaining = Math.max(0, bestRock.hitsRemaining - 1);
+    bestRock.shakeTimer = 0.28;
+    bestRock.shakeDirX = awayX / awayLen;
+    bestRock.shakeDirZ = awayZ / awayLen;
 
-    const burstY = bestNode.baseY + (bestNode.spec.kind === 'tree' ? 1.15 : 0.48);
-    spawnChipBurst(bestNode.spec.x, burstY, bestNode.spec.z, bestNode.spec.kind);
+    spawnChipBurst(bestRock.spec.x, bestRock.baseY + 0.48, bestRock.spec.z, 'rock');
 
-    if (bestNode.hitsRemaining > 0) {
-      if (bestNode.spec.kind === 'rock') {
-        const shrink = 0.62 + 0.38 * (bestNode.hitsRemaining / MAX_HITS_PER_NODE);
-        bestNode.mainPivot.scale.setScalar(bestNode.spec.scale * shrink);
-      }
-      const hitLoot: LootBundle = bestNode.spec.kind === 'tree' ? { wood: 2 } : { stone: 2 };
+    if (bestRock.hitsRemaining > 0) {
+      const shrink = 0.62 + 0.38 * (bestRock.hitsRemaining / MAX_HITS_PER_NODE);
+      bestRock.mainPivot.scale.setScalar(bestRock.spec.scale * shrink);
       return {
         hit: true,
         wrongTool: false,
-        kind: bestNode.spec.kind,
+        kind: 'rock',
         depleted: false,
-        loot: hitLoot,
-        hitX: bestNode.spec.x,
-        hitZ: bestNode.spec.z,
+        loot: { stone: 2 },
+        hitX: bestRock.spec.x,
+        hitZ: bestRock.spec.z,
       };
     }
 
-    // Final strike: fell timber pine or shatter stone outcrop!
-    bestNode.depleted = true;
-    if (bestNode.spec.kind === 'tree') {
-      bestNode.falling = true;
-      bestNode.fallAngle = 0;
-      bestNode.fallVel = 0.65;
-      bestNode.fallLinger = 0;
-      // Rotate relative to group's local Y so tree topples cleanly away from player
-      bestNode.fallYaw = Math.atan2(awayX / awayLen, awayZ / awayLen) - bestNode.spec.rotY;
-      setNodeObstacle(bestNode, bestNode.stumpObstacle);
-      return {
-        hit: true,
-        wrongTool: false,
-        kind: 'tree',
-        depleted: true,
-        loot: { wood: 6 },
-        hitX: bestNode.spec.x,
-        hitZ: bestNode.spec.z,
-      };
-    }
-
-    bestNode.mainPivot.visible = false;
-    setNodeObstacle(bestNode, null);
+    // Final strike: shatter mossy stone outcrop cleanly
+    bestRock.depleted = true;
+    bestRock.mainPivot.visible = false;
+    setNodeObstacle(bestRock, null);
     return {
       hit: true,
       wrongTool: false,
       kind: 'rock',
       depleted: true,
       loot: { stone: 5, scrap: 1 },
-      hitX: bestNode.spec.x,
-      hitZ: bestNode.spec.z,
+      hitX: bestRock.spec.x,
+      hitZ: bestRock.spec.z,
     };
   }
 
@@ -613,44 +509,22 @@ export function createHarvestSystem(options: HarvestSystemOptions): HarvestSyste
       burst.material.opacity = (1 - burst.age / BURST_DURATION) * 0.95;
     }
 
-    // 2. Update hit shakes & smooth tree topple fall animation
-    for (let i = 0; i < nodes.length; i += 1) {
-      const node = nodes[i];
-      if (!node) {
+    // 2. Update pickaxe hit shakes on stone outcrops
+    for (let i = 0; i < rockNodes.length; i += 1) {
+      const node = rockNodes[i];
+      if (!node || node.shakeTimer <= 0) {
         continue;
       }
-      if (node.falling) {
-        if (node.fallAngle < FALL_TARGET_ANGLE) {
-          node.fallVel += 3.6 * dt;
-          node.fallAngle = Math.min(FALL_TARGET_ANGLE, node.fallAngle + node.fallVel * dt);
-          node.mainPivot.rotation.set(node.fallAngle, node.fallYaw, 0);
-        } else {
-          node.fallLinger += dt;
-          if (node.fallLinger >= 2.2) {
-            node.falling = false;
-            node.mainPivot.visible = false;
-          }
-        }
-        continue;
-      }
-
-      if (node.shakeTimer > 0) {
-        node.shakeTimer = Math.max(0, node.shakeTimer - dt);
-        const amp = (node.shakeTimer / 0.28) * (node.spec.kind === 'tree' ? 0.065 : 0.085);
-        const osc = Math.sin(node.shakeTimer * 52);
-        const localCos = Math.cos(node.spec.rotY);
-        const localSin = Math.sin(node.spec.rotY);
-        const lx = node.shakeDirX * localCos - node.shakeDirZ * localSin;
-        const lz = node.shakeDirX * localSin + node.shakeDirZ * localCos;
-        if (node.spec.kind === 'tree') {
-          node.mainPivot.rotation.set(lz * amp * osc, 0, -lx * amp * osc);
-        } else {
-          node.mainPivot.position.set(lx * amp * osc * 0.6, 0, lz * amp * osc * 0.6);
-        }
-        if (node.shakeTimer <= 0) {
-          node.mainPivot.rotation.set(0, 0, 0);
-          node.mainPivot.position.set(0, node.spec.kind === 'tree' ? 0.42 * node.spec.scale : 0, 0);
-        }
+      node.shakeTimer = Math.max(0, node.shakeTimer - dt);
+      const amp = (node.shakeTimer / 0.28) * 0.085;
+      const osc = Math.sin(node.shakeTimer * 52);
+      const localCos = Math.cos(node.spec.rotY);
+      const localSin = Math.sin(node.spec.rotY);
+      const lx = node.shakeDirX * localCos - node.shakeDirZ * localSin;
+      const lz = node.shakeDirX * localSin + node.shakeDirZ * localCos;
+      node.mainPivot.position.set(lx * amp * osc * 0.6, 0, lz * amp * osc * 0.6);
+      if (node.shakeTimer <= 0) {
+        node.mainPivot.position.set(0, 0, 0);
       }
     }
   }
@@ -665,32 +539,41 @@ export function createHarvestSystem(options: HarvestSystemOptions): HarvestSyste
       }
     }
 
-    for (let i = 0; i < nodes.length; i += 1) {
-      const node = nodes[i];
+    for (let i = 0; i < rockNodes.length; i += 1) {
+      const node = rockNodes[i];
       if (!node) {
         continue;
       }
       node.hitsRemaining = MAX_HITS_PER_NODE;
       node.depleted = false;
       node.shakeTimer = 0;
-      node.falling = false;
-      node.fallAngle = 0;
-      node.fallVel = 0;
-      node.fallLinger = 0;
       node.mainPivot.visible = true;
       node.mainPivot.rotation.set(0, 0, 0);
       node.mainPivot.scale.setScalar(node.spec.scale);
-      node.mainPivot.position.set(0, node.spec.kind === 'tree' ? 0.42 * node.spec.scale : 0, 0);
+      node.mainPivot.position.set(0, 0, 0);
       setNodeObstacle(node, node.standingObstacle);
+    }
+
+    if (forest) {
+      forest.resetFelled(obstacles);
     }
   }
 
   function serializeDepletedIds(): string[] {
     const ids: string[] = [];
-    for (let i = 0; i < nodes.length; i += 1) {
-      const node = nodes[i];
+    for (let i = 0; i < rockNodes.length; i += 1) {
+      const node = rockNodes[i];
       if (node && node.depleted) {
         ids.push(node.spec.id);
+      }
+    }
+    if (forest) {
+      const felledTreeIds = forest.serializeFelledIds();
+      for (let i = 0; i < felledTreeIds.length; i += 1) {
+        const treeId = felledTreeIds[i];
+        if (treeId) {
+          ids.push(treeId);
+        }
       }
     }
     return ids;
@@ -702,16 +585,18 @@ export function createHarvestSystem(options: HarvestSystemOptions): HarvestSyste
       return;
     }
     const idSet = new Set(ids);
-    for (let i = 0; i < nodes.length; i += 1) {
-      const node = nodes[i];
+    for (let i = 0; i < rockNodes.length; i += 1) {
+      const node = rockNodes[i];
       if (!node || !idSet.has(node.spec.id)) {
         continue;
       }
       node.hitsRemaining = 0;
       node.depleted = true;
-      node.falling = false;
       node.mainPivot.visible = false;
-      setNodeObstacle(node, node.spec.kind === 'tree' ? node.stumpObstacle : null);
+      setNodeObstacle(node, null);
+    }
+    if (forest) {
+      forest.hydrateFelledIds(ids, obstacles);
     }
   }
 
@@ -720,21 +605,21 @@ export function createHarvestSystem(options: HarvestSystemOptions): HarvestSyste
     readonly remainingRocks: number;
     readonly total: number;
   } {
-    let remainingTrees = 0;
+    const remainingTrees = forest ? forest.getRemainingCount() : 0;
     let remainingRocks = 0;
-    for (let i = 0; i < nodes.length; i += 1) {
-      const node = nodes[i];
+    for (let i = 0; i < rockNodes.length; i += 1) {
+      const node = rockNodes[i];
       if (node && !node.depleted) {
-        if (node.spec.kind === 'tree') remainingTrees += 1;
-        else remainingRocks += 1;
+        remainingRocks += 1;
       }
     }
-    return { remainingTrees, remainingRocks, total: nodes.length };
+    const total = rockNodes.length + (forest ? forest.getTotalCount() : 0);
+    return { remainingTrees, remainingRocks, total };
   }
 
   function dispose(): void {
-    for (let i = 0; i < nodes.length; i += 1) {
-      const node = nodes[i];
+    for (let i = 0; i < rockNodes.length; i += 1) {
+      const node = rockNodes[i];
       if (node) {
         setNodeObstacle(node, null);
       }

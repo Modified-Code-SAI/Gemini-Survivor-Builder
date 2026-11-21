@@ -242,7 +242,10 @@ function startOvergrownFrontier(): void {
   const scavenge = createScavengeSystem();
   engine.scene.add(scavenge.root);
 
-  const harvest = createHarvestSystem({ obstacles: worldObstacles });
+  const harvest = createHarvestSystem({
+    obstacles: worldObstacles,
+    forest: environment.forest,
+  });
   engine.scene.add(harvest.root);
 
   const camp = createCampSystem({

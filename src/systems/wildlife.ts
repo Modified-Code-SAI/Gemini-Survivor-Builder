@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
+import { collectMaterialTextures, loadOptionalGlbAsset } from '../world/assetLoader';
 import {
   clamp,
   getRoadCenterX,
@@ -24,8 +26,18 @@ export interface WildlifeSystem {
   dispose(): void;
 }
 
+interface RavenGlbRig {
+  readonly wrapper: THREE.Group;
+  readonly scene: THREE.Object3D;
+  readonly mixer: THREE.AnimationMixer;
+  readonly glideAction: THREE.AnimationAction | null;
+  readonly flapAction: THREE.AnimationAction | null;
+  wFlap: number;
+}
+
 interface RavenAgent {
   readonly root: THREE.Group;
+  readonly proceduralGroup: THREE.Group;
   readonly leftWing: THREE.Group;
   readonly rightWing: THREE.Group;
   readonly centerX: number;
@@ -35,12 +47,27 @@ interface RavenAgent {
   readonly baseAltitude: number;
   readonly angularSpeed: number;
   readonly initialAngle: number;
+  glb: RavenGlbRig | null;
   angle: number;
   flapPhase: number;
   flareTimer: number;
 }
 
 type DeerState = 'grazing' | 'alert' | 'fleeing' | 'returning';
+
+interface DeerGlbRig {
+  readonly wrapper: THREE.Group;
+  readonly scene: THREE.Object3D;
+  readonly mixer: THREE.AnimationMixer;
+  readonly grazeAction: THREE.AnimationAction | null;
+  readonly alertAction: THREE.AnimationAction | null;
+  readonly trotAction: THREE.AnimationAction | null;
+  readonly gallopAction: THREE.AnimationAction | null;
+  wGraze: number;
+  wAlert: number;
+  wTrot: number;
+  wGallop: number;
+}
 
 interface DeerAgent {
   readonly root: THREE.Group;
@@ -51,9 +78,11 @@ interface DeerAgent {
   readonly legFR: THREE.Group;
   readonly legBL: THREE.Group;
   readonly legBR: THREE.Group;
+  readonly hasAntlers: boolean;
   readonly homeX: number;
   readonly homeZ: number;
   readonly homeYaw: number;
+  glb: DeerGlbRig | null;
   x: number;
   z: number;
   yaw: number;
@@ -70,6 +99,75 @@ interface DeerAgent {
   fleeElapsed: number;
   returnElapsed: number;
   blockedTimer: number;
+}
+
+function findWildlifeClip(
+  clips: readonly THREE.AnimationClip[],
+  exactName: string,
+  fallbackFirst = false,
+): THREE.AnimationClip | null {
+  for (let i = 0; i < clips.length; i += 1) {
+    const clip = clips[i];
+    if (clip && clip.name.toLowerCase() === exactName) {
+      return clip;
+    }
+  }
+  for (let i = 0; i < clips.length; i += 1) {
+    const clip = clips[i];
+    if (clip && clip.name.toLowerCase().includes(exactName)) {
+      return clip;
+    }
+  }
+  return fallbackFirst ? (clips[0] ?? null) : null;
+}
+
+function disposeGlbTrees(trees: readonly THREE.Object3D[]): void {
+  const geometries = new Set<THREE.BufferGeometry>();
+  const materials = new Set<THREE.Material>();
+  const textures = new Set<THREE.Texture>();
+  const skeletons = new Set<THREE.Skeleton>();
+
+  for (let i = 0; i < trees.length; i += 1) {
+    const tree = trees[i];
+    if (!tree) {
+      continue;
+    }
+    tree.traverse((node: THREE.Object3D) => {
+      if (node instanceof THREE.SkinnedMesh && node.skeleton) {
+        skeletons.add(node.skeleton);
+      }
+      if (node instanceof THREE.Mesh || node instanceof THREE.Line || node instanceof THREE.Points) {
+        if (node.geometry instanceof THREE.BufferGeometry) {
+          geometries.add(node.geometry);
+        }
+        const mat = node.material;
+        if (Array.isArray(mat)) {
+          for (const m of mat) {
+            if (m instanceof THREE.Material) {
+              materials.add(m);
+              collectMaterialTextures(m, textures);
+            }
+          }
+        } else if (mat instanceof THREE.Material) {
+          materials.add(mat);
+          collectMaterialTextures(mat, textures);
+        }
+      }
+    });
+  }
+
+  for (const s of skeletons) {
+    s.dispose();
+  }
+  for (const t of textures) {
+    t.dispose();
+  }
+  for (const g of geometries) {
+    g.dispose();
+  }
+  for (const m of materials) {
+    m.dispose();
+  }
 }
 
 function createSeededRng(seed: number): () => number {
@@ -107,7 +205,7 @@ const FIREFLY_VERTEX_SHADER = /* glsl */ `
 
     // Organic bioluminescent pulse cycle (soft dark pause -> golden-chartreuse flash)
     float pulseWave = 0.5 + 0.5 * sin(uTime * (1.8 + fract(aPhase * 7.3) * 1.4) + aPhase * 31.4);
-    float pulse = pow(pulseWave, 2.4);
+    float pulse = pow(max(0.0, pulseWave), 2.4);
     float distFade = (1.0 - smoothstep(18.0, 42.0, dist)) * smoothstep(0.6, 2.4, dist);
     vGlow = pulse * distFade * uIntensity;
 
@@ -128,7 +226,7 @@ const FIREFLY_FRAGMENT_SHADER = /* glsl */ `
     if (r > 0.5) {
       discard;
     }
-    float core = pow(1.0 - r * 2.0, 2.0);
+    float core = pow(max(0.0, 1.0 - r * 2.0), 2.0);
     vec3 warmChartreuse = mix(vec3(0.62, 0.94, 0.28), vec3(1.0, 0.95, 0.54), core);
     gl_FragColor = vec4(warmChartreuse, core * vGlow * 0.92);
   }
@@ -137,6 +235,7 @@ const FIREFLY_FRAGMENT_SHADER = /* glsl */ `
 export function createWildlifeSystem(obstacles: readonly Obstacle[]): WildlifeSystem {
   const root = new THREE.Group();
   root.name = 'PacificNorthwestWildlife';
+  let disposed = false;
 
   const geometries: THREE.BufferGeometry[] = [];
   const materials: THREE.Material[] = [];
@@ -185,21 +284,23 @@ export function createWildlifeSystem(obstacles: readonly Obstacle[]): WildlifeSy
     }
     const [cx, cz, rx, rz, alt, angSpeed, initAngle] = spec;
     const ravenGroup = new THREE.Group();
+    const proceduralGroup = new THREE.Group();
+    ravenGroup.add(proceduralGroup);
 
     const body = new THREE.Mesh(ravenBodyGeo, ravenMat);
-    ravenGroup.add(body);
+    proceduralGroup.add(body);
 
     const head = new THREE.Mesh(ravenHeadGeo, ravenMat);
     head.position.set(0, 0.03, -0.22);
-    ravenGroup.add(head);
+    proceduralGroup.add(head);
 
     const beak = new THREE.Mesh(ravenBeakGeo, ravenMat);
     beak.position.set(0, 0.02, -0.32);
-    ravenGroup.add(beak);
+    proceduralGroup.add(beak);
 
     const tail = new THREE.Mesh(ravenTailGeo, ravenMat);
     tail.position.set(0, 0.01, 0.26);
-    ravenGroup.add(tail);
+    proceduralGroup.add(tail);
 
     const makeWing = (side: -1 | 1): THREE.Group => {
       const wingPivot = new THREE.Group();
@@ -217,13 +318,14 @@ export function createWildlifeSystem(obstacles: readonly Obstacle[]): WildlifeSy
 
     const leftWing = makeWing(-1);
     const rightWing = makeWing(1);
-    ravenGroup.add(leftWing);
-    ravenGroup.add(rightWing);
+    proceduralGroup.add(leftWing);
+    proceduralGroup.add(rightWing);
     ravenGroup.scale.setScalar(1.15);
 
     root.add(ravenGroup);
     ravens.push({
       root: ravenGroup,
+      proceduralGroup,
       leftWing,
       rightWing,
       centerX: cx,
@@ -233,6 +335,7 @@ export function createWildlifeSystem(obstacles: readonly Obstacle[]): WildlifeSy
       baseAltitude: alt,
       angularSpeed: angSpeed,
       initialAngle: initAngle,
+      glb: null,
       angle: initAngle,
       flapPhase: i * 1.7,
       flareTimer: 0,
@@ -426,9 +529,11 @@ export function createWildlifeSystem(obstacles: readonly Obstacle[]): WildlifeSy
       legFR,
       legBL,
       legBR,
+      hasAntlers,
       homeX: spawnProbe.x,
       homeZ: spawnProbe.z,
       homeYaw,
+      glb: null,
       x: spawnProbe.x,
       z: spawnProbe.z,
       yaw: homeYaw,
@@ -452,6 +557,167 @@ export function createWildlifeSystem(obstacles: readonly Obstacle[]): WildlifeSy
     buildDeer(-18.0, -12.0, -0.85, true),
     buildDeer(16.0, -34.0, 2.25, false),
   ];
+
+  // Async upgrade: sculpted, rigged & animated Whitetail Deer GLB (buck with antlers + doe without)
+  void loadOptionalGlbAsset('whitetail_deer').then((loaded) => {
+    if (!loaded) {
+      return;
+    }
+    if (disposed) {
+      disposeGlbTrees([loaded.scene]);
+      return;
+    }
+    if (deerList.length === 0) {
+      disposeGlbTrees([loaded.scene]);
+      return;
+    }
+
+    const clips = loaded.animations;
+    const grazeClip = findWildlifeClip(clips, 'idle_graze', true);
+    const alertClip = findWildlifeClip(clips, 'alert', false);
+    const trotClip = findWildlifeClip(clips, 'trot', false);
+    const gallopClip = findWildlifeClip(clips, 'gallop', false);
+
+    // Clone in reverse so SkeletonUtils.clone reads the untouched bind-pose scene before slot 0 mutates it
+    for (let i = deerList.length - 1; i >= 0; i -= 1) {
+      const deer = deerList[i];
+      if (!deer) {
+        continue;
+      }
+      const instance = i === 0 ? loaded.scene : SkeletonUtils.clone(loaded.scene);
+      instance.traverse((node: THREE.Object3D) => {
+        if (node.name.toLowerCase().includes('antler')) {
+          node.visible = deer.hasAntlers;
+        }
+        if (node instanceof THREE.Mesh) {
+          node.castShadow = true;
+          node.receiveShadow = true;
+          if (node instanceof THREE.SkinnedMesh) {
+            node.frustumCulled = false;
+          }
+        }
+      });
+
+      const wrapper = new THREE.Group();
+      // Convert glTF +Z forward into Three.js -Z controller forward
+      wrapper.rotation.y = Math.PI;
+      wrapper.add(instance);
+
+      const mixer = new THREE.AnimationMixer(instance);
+      const setupLoop = (
+        clip: THREE.AnimationClip | null,
+        weight: number,
+      ): THREE.AnimationAction | null => {
+        if (!clip) {
+          return null;
+        }
+        const action = mixer.clipAction(clip);
+        action.setLoop(THREE.LoopRepeat, Infinity);
+        action.setEffectiveWeight(weight);
+        action.play();
+        return action;
+      };
+
+      const grazeAction = setupLoop(grazeClip, 1);
+      const alertAction = setupLoop(alertClip, 0);
+      const trotAction = setupLoop(trotClip, 0);
+      const gallopAction = setupLoop(gallopClip, 0);
+
+      // Offset initial animation phase so buck & doe never sync robotically
+      mixer.update(i * 0.45);
+      deer.bodyGroup.visible = false;
+      deer.root.add(wrapper);
+
+      deer.glb = {
+        wrapper,
+        scene: instance,
+        mixer,
+        grazeAction,
+        alertAction,
+        trotAction,
+        gallopAction,
+        wGraze: 1,
+        wAlert: 0,
+        wTrot: 0,
+        wGallop: 0,
+      };
+    }
+  });
+
+  // Async upgrade: sculpted, rigged & animated Pacific Raven GLB (soaring glide + flapping wingbeats)
+  void loadOptionalGlbAsset('pacific_raven').then((loaded) => {
+    if (!loaded) {
+      return;
+    }
+    if (disposed) {
+      disposeGlbTrees([loaded.scene]);
+      return;
+    }
+    if (ravens.length === 0) {
+      disposeGlbTrees([loaded.scene]);
+      return;
+    }
+
+    const clips = loaded.animations;
+    const glideClip = findWildlifeClip(clips, 'glide', true);
+    const flapClip = findWildlifeClip(clips, 'flap', false);
+
+    // Clone in reverse so SkeletonUtils.clone copies the untouched bind-pose scene before slot 0 uses it
+    for (let i = ravens.length - 1; i >= 0; i -= 1) {
+      const raven = ravens[i];
+      if (!raven) {
+        continue;
+      }
+      const instance = i === 0 ? loaded.scene : SkeletonUtils.clone(loaded.scene);
+      instance.traverse((node: THREE.Object3D) => {
+        if (node instanceof THREE.Mesh) {
+          node.castShadow = true;
+          node.receiveShadow = false;
+          if (node instanceof THREE.SkinnedMesh) {
+            node.frustumCulled = false;
+          }
+        }
+      });
+
+      const wrapper = new THREE.Group();
+      // Convert glTF +Z forward into Three.js -Z beak-forward flight convention
+      wrapper.rotation.y = Math.PI;
+      wrapper.scale.setScalar(1.0);
+      wrapper.add(instance);
+
+      const mixer = new THREE.AnimationMixer(instance);
+      const setupLoop = (
+        clip: THREE.AnimationClip | null,
+        weight: number,
+      ): THREE.AnimationAction | null => {
+        if (!clip) {
+          return null;
+        }
+        const action = mixer.clipAction(clip);
+        action.setLoop(THREE.LoopRepeat, Infinity);
+        action.setEffectiveWeight(weight);
+        action.play();
+        return action;
+      };
+
+      const glideAction = setupLoop(glideClip, 1);
+      const flapAction = setupLoop(flapClip, 0);
+
+      // Offset initial phase so the 6 soaring ravens flap asynchronously
+      mixer.update(i * 0.29);
+      raven.proceduralGroup.visible = false;
+      raven.root.add(wrapper);
+
+      raven.glb = {
+        wrapper,
+        scene: instance,
+        mixer,
+        glideAction,
+        flapAction,
+        wFlap: 0,
+      };
+    }
+  });
 
   // --- 3. 90 Bioluminescent Night Fireflies drifting over roadside ferns & meadows ---
   const fireflyCount = 90;
@@ -606,13 +872,32 @@ export function createWildlifeSystem(obstacles: readonly Obstacle[]): WildlifeSy
         // Alternate lazy soaring glides with rapid bursts of wingbeats
         const glideCycle = Math.sin(elapsed * 0.45 + i * 2.1);
         const isFlapping = raven.flareTimer > 0 || glideCycle > 0.22;
-        const flapRate = raven.flareTimer > 0 ? 15.5 : 8.5;
-        raven.flapPhase += safeDt * (isFlapping ? flapRate : 1.5);
-        const wingAngle = isFlapping
-          ? Math.sin(raven.flapPhase) * (raven.flareTimer > 0 ? 0.72 : 0.52)
-          : 0.14 + Math.sin(raven.flapPhase) * 0.04;
-        raven.leftWing.rotation.z = wingAngle;
-        raven.rightWing.rotation.z = -wingAngle;
+        if (raven.glb) {
+          const targetFlap = isFlapping ? 1 : 0;
+          const blendAlpha = 1 - Math.exp(-8 * safeDt);
+          raven.glb.wFlap += (targetFlap - raven.glb.wFlap) * blendAlpha;
+          if (raven.glb.wFlap < 0.001 && targetFlap === 0) raven.glb.wFlap = 0;
+          if (raven.glb.wFlap > 0.999 && targetFlap === 1) raven.glb.wFlap = 1;
+
+          const effFlap = raven.glb.flapAction ? raven.glb.wFlap : 0;
+          const effGlide = 1 - effFlap;
+          if (raven.glb.glideAction) {
+            raven.glb.glideAction.setEffectiveWeight(effGlide);
+          }
+          if (raven.glb.flapAction) {
+            raven.glb.flapAction.timeScale = raven.flareTimer > 0 ? 1.48 : 1.08;
+            raven.glb.flapAction.setEffectiveWeight(effFlap);
+          }
+          raven.glb.mixer.update(safeDt);
+        } else {
+          const flapRate = raven.flareTimer > 0 ? 15.5 : 8.5;
+          raven.flapPhase += safeDt * (isFlapping ? flapRate : 1.5);
+          const wingAngle = isFlapping
+            ? Math.sin(raven.flapPhase) * (raven.flareTimer > 0 ? 0.72 : 0.52)
+            : 0.14 + Math.sin(raven.flapPhase) * 0.04;
+          raven.leftWing.rotation.z = wingAngle;
+          raven.rightWing.rotation.z = -wingAngle;
+        }
       }
 
       // 2. Update whitetail deer grazing, alerting, fleeing, and returning cleanly
@@ -716,39 +1001,113 @@ export function createWildlifeSystem(obstacles: readonly Obstacle[]): WildlifeSy
           }
         }
 
-        const strideAmp = clamp(deer.speed / 5.2, 0, 1);
-        if (strideAmp > 0.04) {
-          deer.gaitPhase += safeDt * (deer.speed > 3.5 ? 11.5 : 6.4);
-          const legSwing = Math.sin(deer.gaitPhase) * (0.28 + strideAmp * 0.58);
-          if (deer.speed > 3.5) {
-            // Bounding gallop gait: forelegs & hindlegs pair rhythmically
-            const boundCos = Math.cos(deer.gaitPhase);
-            deer.legFL.rotation.x = legSwing;
-            deer.legFR.rotation.x = legSwing * 0.92;
-            deer.legBL.rotation.x = -legSwing;
-            deer.legBR.rotation.x = -legSwing * 0.92;
-            boundLift = Math.max(0, boundCos) * 0.34 * strideAmp;
-          } else {
-            // Calm diagonal trot gait
-            deer.legFL.rotation.x = legSwing;
-            deer.legBR.rotation.x = legSwing;
-            deer.legFR.rotation.x = -legSwing;
-            deer.legBL.rotation.x = -legSwing;
-            boundLift = Math.abs(Math.sin(deer.gaitPhase)) * 0.06 * strideAmp;
-          }
-        } else {
-          const relax = Math.min(1, safeDt * 8);
-          deer.legFL.rotation.x *= 1 - relax;
-          deer.legFR.rotation.x *= 1 - relax;
-          deer.legBL.rotation.x *= 1 - relax;
-          deer.legBR.rotation.x *= 1 - relax;
-        }
+        if (deer.glb) {
+          // Skeletal gallop clip already encodes realistic suspension lift -> zero procedural bounce
+          boundLift = 0;
 
-        const groundY = getTerrainHeight(deer.x, deer.z);
-        deer.root.position.set(deer.x, groundY + boundLift, deer.z);
-        deer.root.rotation.y = deer.yaw;
-        deer.neckPivot.rotation.x += (neckPitch - deer.neckPivot.rotation.x) * Math.min(1, safeDt * 6);
-        deer.tailPivot.rotation.x += (tailLift - deer.tailPivot.rotation.x) * Math.min(1, safeDt * 10);
+          let tGraze = 0;
+          let tAlert = 0;
+          let tTrot = 0;
+          let tGallop = 0;
+          if (deer.speed > 3.4) {
+            tGallop = 1;
+          } else if (deer.speed >= 0.35) {
+            tTrot = 1;
+          } else if (deer.state === 'alert' || deer.state === 'fleeing') {
+            tAlert = 1;
+          } else {
+            tGraze = 1;
+          }
+
+          if (!deer.glb.gallopAction) {
+            tTrot += tGallop;
+            tGallop = 0;
+          }
+          if (!deer.glb.trotAction) {
+            tAlert += tTrot;
+            tTrot = 0;
+          }
+          if (!deer.glb.alertAction) {
+            tGraze += tAlert;
+            tAlert = 0;
+          }
+
+          const blendAlpha = 1 - Math.exp(-8.5 * safeDt);
+          deer.glb.wGraze += (tGraze - deer.glb.wGraze) * blendAlpha;
+          deer.glb.wAlert += (tAlert - deer.glb.wAlert) * blendAlpha;
+          deer.glb.wTrot += (tTrot - deer.glb.wTrot) * blendAlpha;
+          deer.glb.wGallop += (tGallop - deer.glb.wGallop) * blendAlpha;
+
+          if (deer.glb.wGraze < 0.001 && tGraze === 0) deer.glb.wGraze = 0;
+          if (deer.glb.wAlert < 0.001 && tAlert === 0) deer.glb.wAlert = 0;
+          if (deer.glb.wTrot < 0.001 && tTrot === 0) deer.glb.wTrot = 0;
+          if (deer.glb.wGallop < 0.001 && tGallop === 0) deer.glb.wGallop = 0;
+
+          const wSum = deer.glb.wGraze + deer.glb.wAlert + deer.glb.wTrot + deer.glb.wGallop;
+          if (wSum > 1e-5) {
+            const invSum = 1 / wSum;
+            deer.glb.wGraze *= invSum;
+            deer.glb.wAlert *= invSum;
+            deer.glb.wTrot *= invSum;
+            deer.glb.wGallop *= invSum;
+          } else {
+            deer.glb.wGraze = 1;
+          }
+
+          if (deer.glb.grazeAction) {
+            deer.glb.grazeAction.setEffectiveWeight(deer.glb.wGraze);
+          }
+          if (deer.glb.alertAction) {
+            deer.glb.alertAction.setEffectiveWeight(deer.glb.wAlert);
+          }
+          if (deer.glb.trotAction) {
+            deer.glb.trotAction.timeScale = clamp(deer.speed / 2.2, 0.72, 1.35);
+            deer.glb.trotAction.setEffectiveWeight(deer.glb.wTrot);
+          }
+          if (deer.glb.gallopAction) {
+            deer.glb.gallopAction.timeScale = clamp(deer.speed / 5.5, 0.85, 1.35);
+            deer.glb.gallopAction.setEffectiveWeight(deer.glb.wGallop);
+          }
+          deer.glb.mixer.update(safeDt);
+
+          const groundY = getTerrainHeight(deer.x, deer.z);
+          deer.root.position.set(deer.x, groundY, deer.z);
+          deer.root.rotation.y = deer.yaw;
+        } else {
+          const strideAmp = clamp(deer.speed / 5.2, 0, 1);
+          if (strideAmp > 0.04) {
+            deer.gaitPhase += safeDt * (deer.speed > 3.5 ? 11.5 : 6.4);
+            const legSwing = Math.sin(deer.gaitPhase) * (0.28 + strideAmp * 0.58);
+            if (deer.speed > 3.5) {
+              // Bounding gallop gait: forelegs & hindlegs pair rhythmically
+              const boundCos = Math.cos(deer.gaitPhase);
+              deer.legFL.rotation.x = legSwing;
+              deer.legFR.rotation.x = legSwing * 0.92;
+              deer.legBL.rotation.x = -legSwing;
+              deer.legBR.rotation.x = -legSwing * 0.92;
+              boundLift = Math.max(0, boundCos) * 0.34 * strideAmp;
+            } else {
+              // Calm diagonal trot gait
+              deer.legFL.rotation.x = legSwing;
+              deer.legBR.rotation.x = legSwing;
+              deer.legFR.rotation.x = -legSwing;
+              deer.legBL.rotation.x = -legSwing;
+              boundLift = Math.abs(Math.sin(deer.gaitPhase)) * 0.06 * strideAmp;
+            }
+          } else {
+            const relax = Math.min(1, safeDt * 8);
+            deer.legFL.rotation.x *= 1 - relax;
+            deer.legFR.rotation.x *= 1 - relax;
+            deer.legBL.rotation.x *= 1 - relax;
+            deer.legBR.rotation.x *= 1 - relax;
+          }
+
+          const groundY = getTerrainHeight(deer.x, deer.z);
+          deer.root.position.set(deer.x, groundY + boundLift, deer.z);
+          deer.root.rotation.y = deer.yaw;
+          deer.neckPivot.rotation.x += (neckPitch - deer.neckPivot.rotation.x) * Math.min(1, safeDt * 6);
+          deer.tailPivot.rotation.x += (tailLift - deer.tailPivot.rotation.x) * Math.min(1, safeDt * 10);
+        }
       }
 
       // 3. Bioluminescent night fireflies emerge softly at dusk/night when rain is light
@@ -767,6 +1126,15 @@ export function createWildlifeSystem(obstacles: readonly Obstacle[]): WildlifeSy
         }
         raven.angle = raven.initialAngle;
         raven.flareTimer = 0;
+        if (raven.glb) {
+          raven.glb.wFlap = 0;
+          if (raven.glb.glideAction) {
+            raven.glb.glideAction.setEffectiveWeight(1);
+          }
+          if (raven.glb.flapAction) {
+            raven.glb.flapAction.setEffectiveWeight(0);
+          }
+        }
       }
       for (let i = 0; i < deerList.length; i += 1) {
         const deer = deerList[i];
@@ -786,11 +1154,44 @@ export function createWildlifeSystem(obstacles: readonly Obstacle[]): WildlifeSy
         deer.root.rotation.y = deer.homeYaw;
         deer.neckPivot.rotation.x = -0.06;
         deer.tailPivot.rotation.x = -0.12;
+        if (deer.glb) {
+          deer.glb.wGraze = 1;
+          deer.glb.wAlert = 0;
+          deer.glb.wTrot = 0;
+          deer.glb.wGallop = 0;
+          if (deer.glb.grazeAction) deer.glb.grazeAction.setEffectiveWeight(1);
+          if (deer.glb.alertAction) deer.glb.alertAction.setEffectiveWeight(0);
+          if (deer.glb.trotAction) deer.glb.trotAction.setEffectiveWeight(0);
+          if (deer.glb.gallopAction) deer.glb.gallopAction.setEffectiveWeight(0);
+        }
       }
       ffUniforms.uIntensity.value = 0;
       fireflies.visible = false;
     },
     dispose(): void {
+      disposed = true;
+      const glbRoots: THREE.Object3D[] = [];
+      for (let i = 0; i < deerList.length; i += 1) {
+        const deer = deerList[i];
+        if (deer?.glb) {
+          deer.glb.mixer.stopAllAction();
+          deer.glb.mixer.uncacheRoot(deer.glb.scene);
+          glbRoots.push(deer.glb.scene);
+          deer.glb = null;
+        }
+      }
+      for (let i = 0; i < ravens.length; i += 1) {
+        const raven = ravens[i];
+        if (raven?.glb) {
+          raven.glb.mixer.stopAllAction();
+          raven.glb.mixer.uncacheRoot(raven.glb.scene);
+          glbRoots.push(raven.glb.scene);
+          raven.glb = null;
+        }
+      }
+      if (glbRoots.length > 0) {
+        disposeGlbTrees(glbRoots);
+      }
       for (let i = 0; i < geometries.length; i += 1) {
         geometries[i]?.dispose();
       }

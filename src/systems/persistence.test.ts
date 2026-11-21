@@ -74,6 +74,17 @@ describe('world persistence system', () => {
     const loaded = loadWorldFromStorage(store);
     expect(loaded).toEqual(sample);
 
+    // Verify >64 (80) depletedHarvestIds round-trip cleanly for full-forest timber chopping
+    const manyDepletedIds = Array.from({ length: 80 }, (_, idx) => `forest_tree_${idx}`);
+    const forestSample: WorldSaveData = {
+      ...sample,
+      depletedHarvestIds: manyDepletedIds,
+    };
+    expect(saveWorldToStorage(forestSample, store)).toBe(true);
+    const loadedForest = loadWorldFromStorage(store);
+    expect(loadedForest?.depletedHarvestIds).toEqual(manyDepletedIds);
+    expect(loadedForest?.depletedHarvestIds.length).toBe(80);
+
     clearWorldSave(store);
     expect(hasSavedWorld(store)).toBe(false);
     expect(loadWorldFromStorage(store)).toBeNull();
